@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TelaEdit - an HTML editor for Linux</title>
+<meta name="description" content="TelaEdit is a fast, no-nonsense HTML editor for Linux, for people who write web pages by hand. Free and open source.">
+<link rel="icon" type="image/png" href="telaedit-icon.png">
+<style>
+/* Layout uses floats and percentages only. No flexbox, no grid. */
+* { -webkit-box-sizing: border-box; -moz-box-sizing: border-box; box-sizing: border-box; }
+html { background: #eef1f6; }
+body {
+    margin: 0;
+    font-family: Verdana, Arial, Helvetica, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    color: #222;
+    background: #eef1f6;
+}
+img { max-width: 100%; height: auto; border: 0; }
+a { color: #1b5bfa; }
+a:hover, a:focus { color: #c94700; }
+
+.clearfix:after { content: ""; display: table; clear: both; }
+.wrap { width: 92%; max-width: 1000px; margin: 0 auto; }
+
+/* ---- Header ---- */
+.site-header { background: #fff; border-bottom: 4px solid #e55305; padding: 18px 0; }
+.site-header .logo { float: left; width: 34%; max-width: 280px; }
+.site-header .logo img { display: block; width: 100%; }
+.site-header nav { float: right; width: 60%; text-align: right; padding-top: 10px; }
+.site-header nav a { display: inline-block; margin-left: 4%; text-decoration: none; font-weight: bold; color: #61697b; }
+.site-header nav a:hover, .site-header nav a:focus { color: #1b5bfa; }
+
+/* ---- Hero ---- */
+.hero { background: #fff; padding: 48px 0 44px 0; text-align: center; }
+.hero h1 { font-size: 36px; line-height: 1.2; margin: 0 0 14px 0; color: #1c2536; }
+.hero h1 span { color: #e55305; }
+.hero .lead { width: 80%; margin: 0 auto 28px auto; font-size: 19px; color: #444; }
+.button {
+    display: inline-block;
+    margin: 0 1% 10px 1%;
+    padding: 13px 26px;
+    font-size: 18px;
+    font-weight: bold;
+    text-decoration: none;
+    color: #fff;
+    background: #c94700;
+    border: 2px solid #c94700;
+    border-radius: 6px;
+}
+.button:hover, .button:focus { color: #fff; background: #a83b00; border-color: #a83b00; }
+.button.alt { color: #1b5bfa; background: #fff; border-color: #1b5bfa; }
+.button.alt:hover, .button.alt:focus { color: #fff; background: #1b5bfa; border-color: #1b5bfa; }
+.hero .small { margin: 6px 0 0 0; font-size: 14px; color: #61697b; }
+
+/* ---- Screenshot ---- */
+.shot { padding: 40px 0 10px 0; text-align: center; }
+.shot img { width: 100%; border: 1px solid #c7cdd8; border-radius: 6px; background: #fff; }
+.shot p { margin: 10px 0 0 0; font-size: 14px; color: #61697b; }
+
+/* ---- Sections ---- */
+.section { padding: 44px 0 20px 0; }
+.section h2 { font-size: 27px; margin: 0 0 6px 0; color: #1c2536; }
+.section h2:after { content: ""; display: block; width: 60px; height: 4px; margin-top: 8px; background: #e55305; }
+.section .intro { margin: 14px 0 24px 0; color: #444; }
+
+/* Feature boxes: three across, each about a third wide */
+.frow { margin-left: -1.5%; margin-right: -1.5%; }
+.feature {
+    min-height: 210px;
+    float: left;
+    width: 30.33%;
+    margin: 0 1.5% 3% 1.5%;
+    padding: 20px 20px 14px 20px;
+    background: #fff;
+    border: 1px solid #d5dae3;
+    border-top: 4px solid #1b5bfa;
+    border-radius: 4px;
+}
+.feature h3 { font-size: 18px; margin: 0 0 8px 0; color: #1c2536; }
+.feature p { margin: 0 0 10px 0; font-size: 15px; color: #444; }
+
+/* ---- Install ---- */
+.install { background: #fff; padding: 40px 0 30px 0; margin-top: 30px; border-top: 1px solid #d5dae3; border-bottom: 1px solid #d5dae3; }
+.install .col-a { float: left; width: 48%; }
+.install .col-b { float: right; width: 48%; }
+.install h3 { font-size: 19px; margin: 0 0 8px 0; color: #1c2536; }
+.install ol { margin: 0 0 14px 0; padding-left: 22px; }
+.install li { margin-bottom: 6px; }
+code, pre { font-family: "DejaVu Sans Mono", Consolas, "Courier New", monospace; font-size: 14px; }
+code { background: #eef1f6; border: 1px solid #d5dae3; padding: 1px 5px; border-radius: 3px; }
+pre { margin: 8px 0 14px 0; padding: 12px 14px; background: #1c2536; color: #e8ecf4; border-radius: 4px; overflow: auto; }
+.note { margin: 14px 0 0 0; padding: 10px 14px; background: #fff7e6; border-left: 4px solid #e55305; font-size: 14px; }
+
+/* ---- About / credits ---- */
+.about p { margin: 0 0 12px 0; color: #444; }
+
+/* ---- Footer ---- */
+.site-footer { padding: 26px 0; margin-top: 30px; background: #1c2536; color: #c3cad8; font-size: 14px; text-align: center; }
+.site-footer a { color: #fff; }
+.site-footer p { margin: 0 0 6px 0; }
+
+/* ---- Narrow screens: everything stacks to full width ---- */
+@media (max-width: 760px) {
+    .site-header .logo { float: none; width: 70%; margin: 0 auto 10px auto; }
+    .site-header nav { float: none; width: 100%; text-align: center; padding-top: 0; }
+    .site-header nav a { margin: 0 2%; }
+    .hero { padding: 32px 0 28px 0; }
+    .hero h1 { font-size: 28px; }
+    .hero .lead { width: 100%; font-size: 17px; }
+    .frow { margin-left: 0; margin-right: 0; }
+    .feature { float: none; width: 100%; min-height: 0; margin: 0 0 16px 0; }
+    .install .col-a, .install .col-b { float: none; width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<div class="site-header">
+    <div class="wrap clearfix">
+        <div class="logo"><a href="#top"><img src="telaedit-logo.svg" width="280" height="52" alt="TelaEdit"></a></div>
+        <nav>
+            <a href="#features">Features</a>
+            <a href="#install">Install</a>
+            <a href="#about">About</a>
+            <a href="https://github.com/toxtoo/TelaEdit">GitHub</a>
+        </nav>
+    </div>
+</div>
+
+<div class="hero" id="top">
+    <div class="wrap">
+        <h1>An HTML editor for Linux, for people who <span>write pages by hand</span></h1>
+        <p class="lead">TelaEdit is a fast, no-nonsense editor with syntax colouring, tag helpers, an HTML checker, spell checking and one-click previews in all of your browsers.</p>
+        <p>
+            <a class="button" href="https://github.com/toxtoo/TelaEdit/releases/latest">Download for Linux</a>
+            <a class="button alt" href="https://github.com/toxtoo/TelaEdit">View on GitHub</a>
+        </p>
+        <p class="small">Free and open source (GPL v3). 64-bit Linux. Version 0.5.</p>
+    </div>
+</div>
+
+<div class="shot">
+    <div class="wrap">
+        <img src="screenshots/screenshot-1.png" width="1279" height="841" alt="The TelaEdit window, showing the folder and file panels on the left and a page of HTML being edited">
+        <p>The TelaEdit window: folders and files on the left, your page on the right.</p>
+    </div>
+</div>
+
+<div class="section" id="features">
+    <div class="wrap">
+        <h2>What it does</h2>
+        <p class="intro">Everything you need to write, check and preview a web page, with nothing in the way.</p>
+
+        <div class="frow clearfix">
+            <div class="feature">
+                <h3>Colour that helps</h3>
+                <p>Syntax colouring for HTML, CSS and JavaScript, with the colour and weight of every element under your control. Matching tags and brackets are highlighted, and a bracket with no partner shows in red.</p>
+            </div>
+            <div class="feature">
+                <h3>Tags made easy</h3>
+                <p>Type <code>&lt;div&gt;</code> and the closing tag is added for you. Insert paragraphs, headings, lists, links and images from the menu, and your own snippets from a panel.</p>
+            </div>
+            <div class="feature">
+                <h3>Paths worked out for you</h3>
+                <p>Drag an image from the Explorer into your page and TelaEdit writes the tag with the right relative path and the real width and height.</p>
+            </div>
+        </div>
+
+        <div class="frow clearfix">
+            <div class="feature">
+                <h3>Find and replace everywhere</h3>
+                <p>Search forwards and back, and replace across every open document at once, with a summary of what changed in each.</p>
+            </div>
+            <div class="feature">
+                <h3>Checks your work</h3>
+                <p>Run HTML Tidy and click any message to jump to the line. Spell checking ignores your tags and scripts. Document Weight adds up a page and its images.</p>
+            </div>
+            <div class="feature">
+                <h3>Preview in your browsers</h3>
+                <p>Open the page in up to ten browsers with one click, each with its own shortcut. Add your own tools, such as GIMP, to the toolbar.</p>
+            </div>
+        </div>
+
+        <div class="frow clearfix">
+            <div class="feature">
+                <h3>A proper Explorer</h3>
+                <p>Folders above, the files of the chosen folder below, with a divider you can drag. Right-click to open a folder in your file manager.</p>
+            </div>
+            <div class="feature">
+                <h3>Remembers your place</h3>
+                <p>Open files, cursor positions, bookmarks and window layout all come back the next time you start it.</p>
+            </div>
+            <div class="feature">
+                <h3>Yours to adjust</h3>
+                <p>Change any keyboard shortcut, the editor font, the toolbar icon size and the colours. Back up all your settings to one ZIP file.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="install" id="install">
+    <div class="wrap clearfix">
+        <h2 style="font-size:27px;margin:0 0 18px 0;color:#1c2536;">Install</h2>
+
+        <div class="col-a">
+            <h3>Standalone download (easiest)</h3>
+            <ol>
+                <li>Download <code>telaedit-linux-vX.Y.tar.gz</code> from the <a href="https://github.com/toxtoo/TelaEdit/releases/latest">Releases page</a>.</li>
+                <li>Extract it and open a terminal in the extracted folder.</li>
+                <li>Run the installer:</li>
+            </ol>
+            <pre>./install.sh</pre>
+            <p>TelaEdit then appears in your applications menu. You do not need to install Python or Qt.</p>
+            <p>To remove it again, run <code>./install.sh --uninstall</code>.</p>
+        </div>
+
+        <div class="col-b">
+            <h3>Run from source</h3>
+            <p>You need Python 3. In a terminal:</p>
+<pre>python3 -m venv venv
+./venv/bin/pip install PyQt6 PyQt6-QScintilla
+./venv/bin/python3 telaedit.py</pre>
+            <p>Two features use optional programs: <code>tidy</code> for HTML Tidy, and <code>aspell</code> or <code>hunspell</code> for spell checking.</p>
+            <div class="note"><strong>Formerly SiteForge.</strong> If you used SiteForge, TelaEdit copies your settings across the first time it starts and leaves the old folder untouched.</div>
+        </div>
+    </div>
+</div>
+
+<div class="section about" id="about">
+    <div class="wrap">
+        <h2>About</h2>
+        <p>TelaEdit is a hobby project, written for my own use and shared in case it is useful to others. It is free software, released under the GNU General Public License v3.</p>
+        <p><strong>Built with Claude.</strong> I'm not a programmer. TelaEdit was developed in conversation with AI assistants, mainly <a href="https://claude.ai">Claude</a> from Anthropic. I decided what the editor should do, tested every change on my own computers, and directed the design.</p>
+        <p>Bug reports and suggestions are welcome: please <a href="https://github.com/toxtoo/TelaEdit/issues">open an issue on GitHub</a> and say what you were doing, what you expected and what happened.</p>
+    </div>
+</div>
+
+<div class="site-footer">
+    <div class="wrap">
+        <p><a href="https://github.com/toxtoo/TelaEdit">TelaEdit on GitHub</a> &middot; <a href="https://github.com/toxtoo/TelaEdit/releases">Releases</a> &middot; <a href="https://github.com/toxtoo/TelaEdit/blob/main/LICENSE">Licence (GPL v3)</a></p>
+        <p>Browser names and logos belong to their respective owners.</p>
+    </div>
+</div>
+
+</body>
+</html>
