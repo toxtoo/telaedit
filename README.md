@@ -4,7 +4,7 @@
 
 <img src="screenshots/screenshot1.png" width="1000" alt="TelaEdit main window">
 
-TelaEdit is a fast, no-nonsense HTML editor for Linux, written in Python with PyQt6 and QScintilla. It is built for people who write web pages by hand and want a tidy, familiar tool: syntax colouring, tag helpers, an HTML checker, spell checking and one-click previews in all of your browsers.
+TelaEdit is a fast, no-nonsense HTML editor for Linux, written in Python with PyQt6 and QScintilla. It is built for people who write web pages by hand and want a tidy, familiar tool: syntax colouring, tag helpers, an HTML checker, spell checking and one-click previews in all of your browsers. Tela is Latin for “web”, as in a woven web, so TelaEdit is simply a web editor.
 
 Press **F1** inside TelaEdit at any time to open the built-in help.
 
