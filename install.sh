@@ -57,16 +57,23 @@ case "$EXEC_PATH" in
     *" "*) EXEC_PATH="\"$EXEC_PATH\"" ;;
 esac
 
-# Write the launcher with the correct paths for this computer
+# Write the launcher with the correct paths for this computer.
+#
+# %F on the Exec line: the file manager adds the file(s) you chose with
+# "Open With", and TelaEdit opens them.
+# MimeType: the kinds of file TelaEdit is offered for in "Open With"
+# (HTML, CSS, JavaScript, XML and plain text). It does not make TelaEdit
+# the default program for them; you choose that in the file manager.
 cat > "$LAUNCHER" <<EOF
 [Desktop Entry]
 Type=Application
 Name=TelaEdit
 Comment=HTML editor
-Exec=$EXEC_PATH
+Exec=$EXEC_PATH %F
 Icon=$APPDIR/telaedit-icon.png
 Terminal=false
 Categories=Development;WebDevelopment;TextEditor;
+MimeType=text/html;application/xhtml+xml;text/css;text/javascript;application/javascript;application/x-javascript;text/xml;application/xml;text/plain;
 EOF
 
 chmod 644 "$LAUNCHER"
@@ -93,5 +100,10 @@ echo "TelaEdit is installed."
 echo
 echo "Look for TelaEdit in your applications menu (under Programming or"
 echo "Development). If it isn't there yet, log out and back in."
+echo
+echo "To open a file with TelaEdit from the file manager, right-click it and"
+echo "choose Open With > TelaEdit. To make TelaEdit the usual program for"
+echo "that kind of file, use Open With > Other Application and tick the"
+echo "option to remember it (the wording varies between file managers)."
 echo
 echo "To remove it later, run:  ./install.sh --uninstall"

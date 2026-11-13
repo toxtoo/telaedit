@@ -23,7 +23,7 @@ OLD_CONFIG_DIR = Path.home() / ".config" / "SiteForge"
 STATE_FILE = CONFIG_DIR / "state.json"
 # The version shown in Help > About. Change this for each new release,
 # and use the same number when you run make-release.sh.
-APP_VERSION = "0.5"
+APP_VERSION = "0.6"
 
 SHORTCUTS_FILE = CONFIG_DIR / "shortcuts.json"
 BROWSERS_FILE = CONFIG_DIR / "browsers.json"
@@ -144,6 +144,13 @@ from PyQt6.Qsci import (
     QsciScintilla, QsciLexerHTML,
     QsciLexerCSS, QsciLexerJavaScript
 )
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+
+# The name a running TelaEdit listens on. When you open a file with
+# TelaEdit (for example "Open with TelaEdit" in the file manager) while it
+# is already running, the file is sent to the running copy rather than a
+# second window being opened.
+INSTANCE_SERVER_NAME = f"TelaEdit-{os.getuid()}"
 
 
 def apply_saved_font(font, saved):
@@ -277,7 +284,7 @@ SPELL_MASK = re.compile(
 )
 
 # A word: letters only, with apostrophes allowed inside (don't, Stuart's)
-SPELL_WORD = re.compile(r"(?<!\w)[^\W\d_]+(?:['\u2019][^\W\d_]+)*(?!\w)")
+SPELL_WORD = re.compile(r"(?<!\w)[^\W\d_]+(?:['’][^\W\d_]+)*(?!\w)")
 
 SPELL_INSTALL_HELP = (
     "Spell checking needs the program aspell or hunspell, with a "
@@ -518,11 +525,21 @@ class ImageSourceParser(HTMLParser):
 
 class CodeEditor(QsciScintilla):
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, suffix=".html"):
         super().__init__()
         self.setAcceptDrops(True)
 
         self.path = Path(path).resolve() if path else None
+
+        # The kind of file an untitled document is (".html", ".css" or
+        # ".js"), so it gets the right colouring before it is saved
+        self.untitled_suffix = suffix
+
+        # For new CSS and JavaScript files: the "File: untitled.css" line in
+        # the comment at the top, which is changed to the real file name
+        # when the file is first saved
+        self.header_placeholder = None
+
         self.setUtf8(True)
 
         editor_font = QFont("Monospace", 10)
@@ -555,7 +572,7 @@ class CodeEditor(QsciScintilla):
             self.bookmark_marker,
             bookmark_pixmap
         )
-        
+
         try:
             data = json.loads(settings.read_text())
             saved_color = data.get("bookmark_color", "#ff0000")
@@ -610,7 +627,7 @@ class CodeEditor(QsciScintilla):
         self.setCaretLineBackgroundColor(self.current_line_color)
 
         self.set_language()
-        
+
         # Tag matching configuration & indicator setup
         self.tag_indicator = self.indicatorDefine(
             QsciScintilla.IndicatorStyle.RoundBoxIndicator
@@ -631,7 +648,7 @@ class CodeEditor(QsciScintilla):
             self.tag_pair_color, self.tag_indicator
         )
         self.setIndicatorDrawUnder(True, self.tag_indicator)
-        
+
         # Feed the swapped hex code so Scintilla flips it back to blue
         sel_bg = QColor("#c68c30")
         sel_fg = QColor("#ffffff")
@@ -697,7 +714,7 @@ class CodeEditor(QsciScintilla):
 
     def keyPressEvent(self, event):
         super().keyPressEvent(event)
-        
+
         if self.has_active_selection():
             self.clear_tag_highlights()
 
@@ -779,12 +796,17 @@ class CodeEditor(QsciScintilla):
             QsciScintilla.SCI_INDICSETOUTLINEALPHA, self.spell_indicator, 140
         )
 
+    def file_suffix(self):
+        """The file extension: from the file name once it has been saved,
+        otherwise the kind of new file it was created as."""
+        if self.path:
+            return self.path.suffix.lower()
+
+        return self.untitled_suffix
+
     def spell_applicable(self):
         """Spell check page text, not code files."""
-        if not self.path:
-            return True
-
-        return self.path.suffix.lower() in (
+        return self.file_suffix() in (
             ".html", ".htm", ".xhtml", ".txt", ".md"
         )
 
@@ -812,7 +834,7 @@ class CodeEditor(QsciScintilla):
 
         found = []
         for match in SPELL_WORD.finditer(masked):
-            word = match.group(0).replace("\u2019", "'")
+            word = match.group(0).replace("’", "'")
 
             # Skip single letters and ACRONYMS
             if len(word) < 2 or word.isupper():
@@ -961,7 +983,7 @@ class CodeEditor(QsciScintilla):
 
         menu.popup(event.globalPos())
 
-    def toggle_bookmark(self, margin, line, modifiers): 
+    def toggle_bookmark(self, margin, line, modifiers):
         if margin != 1:
             return
 
@@ -1067,7 +1089,7 @@ class CodeEditor(QsciScintilla):
         event.acceptProposedAction()
 
     def set_language(self):
-        suffix = self.path.suffix.lower() if self.path else ".html"
+        suffix = self.file_suffix()
 
         self.syntax_key = syntax_language_key(suffix)
 
@@ -1259,6 +1281,9 @@ class CodeEditor(QsciScintilla):
     def save_file(self, path=None):
         if path:
             self.path = Path(path).resolve()
+
+            # Saved under a (new) name: colour it for that kind of file
+            self.set_language()
 
         if not self.path:
             return False
@@ -1740,10 +1765,12 @@ class FilesOnlyProxyModel(QSortFilterProxyModel):
 
 
 def external_program_env():
-    """The environment for programs TelaEdit starts (such as the file
-    manager). The standalone build changes LD_LIBRARY_PATH so it can find its
-    own libraries. Other programs must get the original value back, or they
-    can fail to start."""
+    """The environment for programs TelaEdit starts (the file manager,
+    browsers and external tools). The standalone build changes
+    LD_LIBRARY_PATH so it can find its own libraries. Other programs must
+    get the original value back, or they can fail to start (this is why
+    older browsers such as Firefox 4 would not open from the standalone
+    build)."""
     env = dict(os.environ)
 
     if getattr(sys, "frozen", False):
@@ -1759,8 +1786,12 @@ def external_program_env():
 
 class TelaEdit(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, start_files=None):
         super().__init__()
+
+        # Files named when TelaEdit was started (from "Open with TelaEdit"
+        # or the command line). They are opened after the last session.
+        self.start_files = list(start_files or [])
 
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1768,7 +1799,7 @@ class TelaEdit(QMainWindow):
 
         self.setWindowTitle("TelaEdit")
         icon_path = os.path.join(os.path.dirname(__file__), "icons", "telaedit-icon.png")
-        self.setWindowIcon(QIcon(icon_path))   
+        self.setWindowIcon(QIcon(icon_path))
         window_settings = STATE_FILE
 
         try:
@@ -1789,7 +1820,7 @@ class TelaEdit(QMainWindow):
         self.restore_maximized = window_data.get("window_maximized", False)
         self.saved_explorer_width = window_data.get("explorer_width", 250)
         self.saved_explorer_split = window_data.get("explorer_split", [])
-        
+
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
@@ -1802,9 +1833,9 @@ class TelaEdit(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.position_label = QLabel("Line 1, Column 1", self)
-        self.status.addPermanentWidget(self.position_label)        
+        self.status.addPermanentWidget(self.position_label)
         self.last_directory = self.load_last_directory()
-        self.recent_files = self.load_recent_files()        
+        self.recent_files = self.load_recent_files()
         self.create_file_panel()
         self.create_actions()
         self.setup_tidy_tool()
@@ -1818,6 +1849,9 @@ class TelaEdit(QMainWindow):
         SPELLER.on_error = self.spell_error
         self.register_snippet_shortcuts()
         self.restore_session()
+
+        if self.start_files:
+            self.open_files_from_command_line(self.start_files)
 
         if SPELLER.enabled and not SPELLER.available():
             self.status.showMessage(
@@ -1999,7 +2033,7 @@ class TelaEdit(QMainWindow):
 
         dock.setWidget(self.explorer_tabs)
         self.refresh_snippet_list()
-        
+
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         self.resizeDocks([dock], [self.saved_explorer_width], Qt.Orientation.Horizontal)
 
@@ -2402,7 +2436,7 @@ class TelaEdit(QMainWindow):
         data["spell_check_enabled"] = self.actions["spellcheck"].isChecked()
         data["spell_language"] = SPELLER.language
         data["spell_style"] = SPELLER.style
-        
+
         geometry = (
             self.normalGeometry()
             if self.isMaximized()
@@ -2418,7 +2452,7 @@ class TelaEdit(QMainWindow):
         data["window_maximized"] = self.isMaximized()
         data["explorer_width"] = self.file_dock.width()
         data["explorer_split"] = self.explorer_splitter.sizes()
-        
+
         try:
             settings.write_text(json.dumps(data, indent=4))
         except OSError:
@@ -2487,17 +2521,91 @@ class TelaEdit(QMainWindow):
             self.tabs.setCurrentIndex(
                 min(active_index, self.tabs.count() - 1)
             )
-        else:
+        elif not self.start_files:
+            # Nothing to reopen and no file to open: start with a new page
             self.new_file()
+
+    def open_files_from_command_line(self, files):
+        """Opens files given to TelaEdit from outside, such as with
+        "Open with TelaEdit" in the file manager."""
+        missing = []
+
+        for path in files:
+            if Path(path).is_file():
+                self.open_path(path)
+            else:
+                missing.append(path)
+
+        if missing:
+            self.status.showMessage(
+                "Could not open (not found): " + ", ".join(missing), 10000
+            )
+
+        # Always leave at least one document open
+        if self.tabs.count() == 0:
+            self.new_file()
+
+    def start_listening(self):
+        """Listens for files sent by TelaEdit being started again while
+        this window is open."""
+        self.instance_server = QLocalServer(self)
+
+        # Clears a name left behind if TelaEdit ever stopped unexpectedly
+        QLocalServer.removeServer(INSTANCE_SERVER_NAME)
+
+        if not self.instance_server.listen(INSTANCE_SERVER_NAME):
+            return
+
+        self.instance_server.newConnection.connect(self.on_instance_connection)
+
+    def on_instance_connection(self):
+        while self.instance_server.hasPendingConnections():
+            connection = self.instance_server.nextPendingConnection()
+            data = bytearray()
+
+            connection.readyRead.connect(
+                lambda c=connection, d=data: d.extend(bytes(c.readAll()))
+            )
+            connection.disconnected.connect(
+                lambda c=connection, d=data: self.receive_files(c, d)
+            )
+
+    def receive_files(self, connection, data):
+        """The other copy of TelaEdit has sent its list of files."""
+        data.extend(bytes(connection.readAll()))
+        connection.deleteLater()
+
+        try:
+            files = json.loads(data.decode("utf-8") or "[]")
+        except (ValueError, UnicodeError):
+            files = []
+
+        if not isinstance(files, list):
+            files = []
+
+        if files:
+            self.open_files_from_command_line([str(path) for path in files])
+
+        self.bring_to_front()
+
+    def bring_to_front(self):
+        if self.isMinimized():
+            self.showNormal()
+
+        self.raise_()
+        self.activateWindow()
 
     def create_actions(self):
         self.actions = {}
         self.shortcut_settings_file = SHORTCUTS_FILE
-        
+
         icon_directory = Path(__file__).resolve().parent / "icons" / "menu"
 
         icon_files = {
             "new": "new.png",
+            "new_css": "new.png",
+            "new_js": "new.png",
+            "new_empty": "new.png",
             "open": "open.png",
             "save": "save.png",
             "saveall": "saveall.png",
@@ -2539,10 +2647,18 @@ class TelaEdit(QMainWindow):
             action.triggered.connect(function)
             self.actions[name] = action
 
-        add("new", "New", "Ctrl+N", self.new_file)
+        add("new", "HTML Page", "Ctrl+N", self.new_file)
+        add("new_css", "CSS File", "",
+            lambda checked=False: self.new_code_file(".css"))
+        add("new_js", "JavaScript File", "",
+            lambda checked=False: self.new_code_file(".js"))
+        add("new_empty", "Empty Page", "", self.new_empty_page)
+
+        # The toolbar button shows this rather than just "HTML Page"
+        self.actions["new"].setToolTip("New HTML Page")
         add("open", "Open...", "Ctrl+O", self.open_file)
         add("save", "Save", "Ctrl+S", self.save_file)
-        add("saveall", "Save All", "Ctrl+Alt+S", self.save_all)        
+        add("saveall", "Save All", "Ctrl+Alt+S", self.save_all)
         add("saveas", "Save As...", "Ctrl+Shift+S", self.save_as)
         add("close", "Close Tab", "Ctrl+W",
             lambda: self.close_tab(self.tabs.currentIndex()))
@@ -2552,8 +2668,8 @@ class TelaEdit(QMainWindow):
         add("find", "Find and Replace...", "Ctrl+F", self.show_find_replace)
         add("findnext", "Find Next", "F3", self.find_next_in_dialog)
         add("findprevious", "Find Previous", "Shift+F3", self.find_previous_in_dialog)
-        add("gotoline", "Go to Line...", "Ctrl+G", self.go_to_line)        
-        add("replaceall", "Replace...", "Ctrl+H", self.show_replace_dialog)        
+        add("gotoline", "Go to Line...", "Ctrl+G", self.go_to_line)
+        add("replaceall", "Replace...", "Ctrl+H", self.show_replace_dialog)
         add("quit", "Quit", "Ctrl+Q", self.close)
         add("close_all", "Close All", "", self.close_all_tabs)
         add("help", "TelaEdit Help", "F1", self.show_help)
@@ -2586,14 +2702,14 @@ class TelaEdit(QMainWindow):
         add("insert_hr", "Horizontal Rule", "", self.insert_horizontal_rule)
         add("insert_link", "Link...", "", self.insert_link)
         add("insert_image", "Image...", "", self.insert_image)
-     
+
         panel_action = QAction("Explorer", self)
         panel_action.setCheckable(True)
         panel_action.setChecked(True)
         panel_action.triggered.connect(self.file_dock.setVisible)
         self.file_dock.visibilityChanged.connect(panel_action.setChecked)
         self.actions["filepanel"] = panel_action
-        
+
         wrap_action = QAction("Word wrap", self)
         wrap_action.setCheckable(True)
         wrap_action.setChecked(False)
@@ -2620,8 +2736,8 @@ class TelaEdit(QMainWindow):
         add("indent_line", "Indent Line", "Ctrl+]", self.indent_line)
         add("unindent_line", "Unindent Line", "Ctrl+[", self.unindent_line)
         add("indent_block", "Indent Block", "Ctrl+Shift+]", self.indent_block)
-        add("unindent_block", "Unindent Block", "Ctrl+Shift+[", self.unindent_block)        
-        
+        add("unindent_block", "Unindent Block", "Ctrl+Shift+[", self.unindent_block)
+
         self.default_shortcuts = {
             name: action.shortcut().toString()
             for name, action in self.actions.items()
@@ -2942,7 +3058,20 @@ class TelaEdit(QMainWindow):
             return
 
         try:
-            subprocess.Popen([command, str(editor.path)])
+            # external_program_env() gives the browser the system's own
+            # library settings rather than the standalone build's, so older
+            # browsers such as Firefox 4 start properly
+            subprocess.Popen(
+                [command, str(editor.path)],
+                env=external_program_env(),
+                start_new_session=True
+            )
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self, "TelaEdit",
+                f"Could not find the browser:\n{command}\n\n"
+                "Check the path in Browsers > Configure browsers."
+            )
         except Exception as error:
             QMessageBox.critical(
                 self, "TelaEdit",
@@ -2982,7 +3111,8 @@ class TelaEdit(QMainWindow):
         tree.setRootIsDecorated(True)
 
         standard_names = {
-            "new", "open", "save", "saveall", "saveas",
+            "new", "new_css", "new_js", "new_empty",
+            "open", "save", "saveall", "saveas",
             "close", "undo", "redo", "find", "findnext",
             "findprevious", "gotoline", "replaceall", "quit",
         }
@@ -3261,7 +3391,14 @@ class TelaEdit(QMainWindow):
 
         file_menu = bar.addMenu("&File")
 
-        for name in ("new", "open", "save", "saveall", "saveas", "close"):
+        # File > New: the kinds of new document
+        new_menu = file_menu.addMenu("New")
+        new_menu.setIcon(self.actions["new"].icon())
+
+        for name in ("new", "new_css", "new_js", "new_empty"):
+            new_menu.addAction(self.actions[name])
+
+        for name in ("open", "save", "saveall", "saveas", "close"):
             file_menu.addAction(self.actions[name])
 
         file_menu.addAction(self.actions["close_all"])
@@ -3300,8 +3437,8 @@ class TelaEdit(QMainWindow):
         search_menu.addAction(self.actions["find"])
         search_menu.addAction(self.actions["findnext"])
         search_menu.addAction(self.actions["findprevious"])
-        search_menu.addAction(self.actions["replaceall"]) 
-        search_menu.addAction(self.actions["gotoline"])                      
+        search_menu.addAction(self.actions["replaceall"])
+        search_menu.addAction(self.actions["gotoline"])
 
         view_menu = bar.addMenu("&View")
         view_menu.addAction(self.actions["filepanel"])
@@ -3404,7 +3541,7 @@ class TelaEdit(QMainWindow):
 
         tab_definitions = [
             ("Standard", (
-                "filepanel", "new", "open", "save", "close_all", "undo", "redo", 
+                "filepanel", "new", "open", "save", "close_all", "undo", "redo",
             )),
             ("HTML", (
                 "insert_paragraph", "insert_h1", "insert_h2",
@@ -3439,7 +3576,7 @@ class TelaEdit(QMainWindow):
                     if action:
                         button = QToolButton(page)
                         button.setDefaultAction(action)
-                        
+
                         # Give tidy text beside its icon; keep others icon-only
                         if name == "tidy":
                             button.setToolButtonStyle(
@@ -3449,8 +3586,8 @@ class TelaEdit(QMainWindow):
                             button.setToolButtonStyle(
                                 Qt.ToolButtonStyle.ToolButtonIconOnly
                             )
-                            
-                        button.setToolTip(action.text())
+
+                        button.setToolTip(action.toolTip())
                         layout.addWidget(button)
                 layout.addStretch()
 
@@ -3592,7 +3729,7 @@ class TelaEdit(QMainWindow):
             button.setText(name)
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             button.setToolTip(f"Run external tool: {name}")
-            
+
             # Connect click to launch the external command
             button.clicked.connect(
                 lambda checked=False, e=entry: self.launch_external_tool(e)
@@ -3801,7 +3938,13 @@ class TelaEdit(QMainWindow):
             arguments.append(str(editor.path))
 
         try:
-            subprocess.Popen(arguments, start_new_session=True)
+            # Same as the browsers: give the program the system's own
+            # library settings, not the standalone build's
+            subprocess.Popen(
+                arguments,
+                env=external_program_env(),
+                start_new_session=True
+            )
             self.status.showMessage(f"Started {name}", 2500)
         except FileNotFoundError:
             QMessageBox.warning(
@@ -3816,7 +3959,7 @@ class TelaEdit(QMainWindow):
 
     def editor(self):
         return self.tabs.currentWidget()
-        
+
     def editor_call(self, method):
         editor = self.editor()
         if editor:
@@ -4174,7 +4317,7 @@ class TelaEdit(QMainWindow):
 
         editor.setCursorPosition(line_number - 1, 0)
         editor.ensureLineVisible(line_number - 1)
-        editor.setFocus()            
+        editor.setFocus()
 
     def update_cursor_position(self, *_):
         editor = self.editor()
@@ -4186,7 +4329,7 @@ class TelaEdit(QMainWindow):
         line, column = editor.getCursorPosition()
         self.position_label.setText(
             f"Line {line + 1}, Column {column + 1}"
-        )           
+        )
 
     def show_find_replace(self):
         editor = self.editor()
@@ -4210,7 +4353,7 @@ class TelaEdit(QMainWindow):
     def show_replace_dialog(self):
         self.show_find_replace()
         self.find_replace_dialog.replace_input.setFocus()
-        
+
     def find_next_in_dialog(self):
         if not hasattr(self, "find_replace_dialog"):
             self.show_find_replace()
@@ -4220,7 +4363,7 @@ class TelaEdit(QMainWindow):
             self.find_replace_dialog.show()
 
         self.find_replace_dialog.find_next()
-        
+
     def find_previous_in_dialog(self):
         if not hasattr(self, "find_replace_dialog"):
             self.show_find_replace()
@@ -4229,7 +4372,7 @@ class TelaEdit(QMainWindow):
         if not self.find_replace_dialog.isVisible():
             self.find_replace_dialog.show()
 
-        self.find_replace_dialog.find_previous()                
+        self.find_replace_dialog.find_previous()
 
     def toggle_word_wrap(self, checked):
         mode = (
@@ -4439,7 +4582,7 @@ class TelaEdit(QMainWindow):
                 editor.unindent(line)
         finally:
             editor.endUndoAction()
-            
+
     def choose_editor_font(self):
         editor = self.editor()
         if not editor:
@@ -4874,12 +5017,17 @@ class TelaEdit(QMainWindow):
             )
             template_text = ""
 
-        editor = CodeEditor()
+        self.open_new_tab(template_text, ".html")
+
+    def open_new_tab(self, text, suffix):
+        """Opens an untitled document of the given kind (".html", ".css"
+        or ".js") in a new tab, containing text. Returns the editor."""
+        editor = CodeEditor(suffix=suffix)
         editor.cursorPositionChanged.connect(self.update_cursor_position)
 
         if self.actions["wordwrap"].isChecked():
             editor.setWrapMode(QsciScintilla.WrapMode.WrapWord)
-        
+
         editor.tag_completion_enabled = self.actions["tag_completion"].isChecked()
 
         editor.modificationChanged.connect(
@@ -4888,9 +5036,38 @@ class TelaEdit(QMainWindow):
 
         index = self.tabs.addTab(editor, "Untitled")
         self.tabs.setCurrentIndex(index)
-        editor.setText(template_text)
+        editor.setText(text)
         editor.setModified(False)
         editor.setFocus()
+        return editor
+
+    def new_code_file(self, suffix):
+        """File > New > CSS File or JavaScript File.
+
+        The file starts with a short comment giving its name and the date.
+        The name reads 'untitled.css' (or .js) until you save it, when it
+        is changed to the name you give the file."""
+        placeholder = f"   File: untitled{suffix}"
+        today = datetime.now()
+        date = f"{today.day} {today:%B %Y}"
+
+        header = (
+            "/*\n"
+            f"{placeholder}\n"
+            f"   Created: {date}\n"
+            "*/\n"
+            "\n"
+        )
+
+        editor = self.open_new_tab(header, suffix)
+        editor.header_placeholder = placeholder
+
+        # Start typing below the comment
+        editor.setCursorPosition(editor.lines() - 1, 0)
+
+    def new_empty_page(self):
+        """File > New > Empty Page: a blank HTML document, no template."""
+        self.open_new_tab("", ".html")
 
     def choose_indentation_settings(self):
         settings = STATE_FILE
@@ -5012,7 +5189,7 @@ class TelaEdit(QMainWindow):
     def open_path(self, path, record_recent=True):
         target = Path(path).resolve()
         self.remember_directory(target.parent)
-        
+
         for index in range(self.tabs.count()):
             editor = self.tabs.widget(index)
 
@@ -5029,9 +5206,9 @@ class TelaEdit(QMainWindow):
             editor.cursorPositionChanged.connect(self.update_cursor_position)
             if self.actions["wordwrap"].isChecked():
                 editor.setWrapMode(QsciScintilla.WrapMode.WrapWord)
-            
+
             editor.tag_completion_enabled = self.actions["tag_completion"].isChecked()
-                
+
             editor.modificationChanged.connect(
                 lambda modified, e=editor: self.update_tab_label(e)
             )
@@ -5122,22 +5299,52 @@ class TelaEdit(QMainWindow):
         if not editor:
             return
 
+        # Start the dialog on the right file type for this document
+        file_types = {
+            ".html": "HTML (*.html)",
+            ".css": "CSS (*.css)",
+            ".js": "JavaScript (*.js)",
+        }
+        suffix = editor.file_suffix()
+
         path, _ = QFileDialog.getSaveFileName(
             self, "Save source file", self.last_directory,
-            "HTML (*.html);;CSS (*.css);;JavaScript (*.js);;All files (*)"
+            "HTML (*.html);;CSS (*.css);;JavaScript (*.js);;All files (*)",
+            file_types.get(suffix, "All files (*)")
         )
 
-        if path:
-            try:
-                editor.save_file(path)
-                self.remember_directory(Path(path).parent)
-                self.update_tab_label(editor)
+        if not path:
+            return
 
-            except Exception as error:
-                QMessageBox.critical(
-                    self, "TelaEdit",
-                    f"Could not save file:\n{error}"
-                )
+        # A name typed without an extension gets this document's one
+        if not Path(path).suffix and suffix:
+            path += suffix
+
+        # New CSS/JavaScript file: put the real name in the comment at the top
+        placeholder = editor.header_placeholder
+
+        if (
+            placeholder
+            and editor.lines() > 1
+            and editor.text(1).rstrip("\r\n") == placeholder
+        ):
+            line, index = editor.getCursorPosition()
+            editor.setSelection(1, 0, 1, len(placeholder))
+            editor.replaceSelectedText(f"   File: {Path(path).name}")
+            editor.setCursorPosition(line, index if line != 1 else 0)
+
+        editor.header_placeholder = None
+
+        try:
+            editor.save_file(path)
+            self.remember_directory(Path(path).parent)
+            self.update_tab_label(editor)
+
+        except Exception as error:
+            QMessageBox.critical(
+                self, "TelaEdit",
+                f"Could not save file:\n{error}"
+            )
 
     def save_as_template(self):
         editor = self.editor()
@@ -5646,7 +5853,7 @@ class TelaEdit(QMainWindow):
 
             snippets.append(snippet)
             self.save_snippets(snippets)
-            self.refresh_snippet_list()            
+            self.refresh_snippet_list()
             refresh_list()
 
         def edit_snippet():
@@ -5862,29 +6069,29 @@ class TelaEdit(QMainWindow):
     def setup_tidy_tool(self):
         """Sets up the Check HTML with Tidy action and button icon."""
         self.tidy_action = QAction("Run HTML Tidy", self)
-        
+
         from pathlib import Path
         base_dir = Path(__file__).resolve().parent
-        
+
         # Check a few common places where the icon might live
         possible_paths = [
             base_dir / "menu" / "tidy.png",
             base_dir / "icons" / "tidy.png",
             base_dir / "icons" / "menu" / "tidy.png"
         ]
-        
+
         icon_found = False
         for icon_path in possible_paths:
             if icon_path.is_file():
                 self.tidy_action.setIcon(QIcon(str(icon_path)))
                 icon_found = True
                 break
-                
+
         if not icon_found:
             print("Notice: Tidy icon image not found, using text/default fallback.")
-        
+
         self.tidy_action.triggered.connect(self.run_html_tidy)
-        
+
         self.actions = getattr(self, 'actions', {})
         self.actions["tidy"] = self.tidy_action
 
@@ -5909,19 +6116,19 @@ class TelaEdit(QMainWindow):
         """Executes the HTML check on the currently active editor tab using HTML Tidy."""
 
         current_editor = self.editor() if hasattr(self, 'editor') else None
-        
+
         if current_editor is None:
             self.log_message("Active editor not found for Tidy check.")
             return
 
         html_content = current_editor.text()
-        
+
         if not html_content.strip():
             self.log_message("The editor is empty. Nothing to tidy.")
             return
 
         self.log_message("--- Running HTML Tidy check ---")
-        
+
         try:
             import subprocess
             # Run html tidy, passing the editor content via stdin
@@ -5931,18 +6138,18 @@ class TelaEdit(QMainWindow):
                 text=True,
                 capture_output=True
             )
-            
+
             # Tidy reports errors and warnings on stderr
             errors = process.stderr.strip()
             output = process.stdout.strip()
-            
+
             if errors:
                 self.log_message("Tidy Report:\n" + errors)
             elif output:
                 self.log_message("Tidy Output:\n" + output)
             else:
                 self.log_message("HTML Tidy check completed: No errors or warnings found! ✨")
-                
+
         except FileNotFoundError:
             self.log_message("Error: 'tidy' command-line tool is not installed or not found in system PATH.")
             self.log_message("Tip: You can install it via your terminal using 'sudo apt install tidy'.")
@@ -6034,7 +6241,7 @@ class TelaEdit(QMainWindow):
         # Add it to the bottom of the main window by default
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.output_dock)
         self.output_dock.hide()
-        
+
     def go_to_line_column(self, line_number, column):
         """Moves the cursor in the current editor to a 1-based line and column."""
         editor = self.editor()
@@ -6069,7 +6276,50 @@ palette.setColor(QPalette.ColorRole.Window, QColor("#efefef"))
 palette.setColor(QPalette.ColorRole.Button, QColor("#efefef"))
 app.setPalette(palette)
 
-window = TelaEdit()
+
+def files_from_arguments(arguments):
+    """The files named on the command line, as full paths. The file
+    manager passes them this way for "Open with TelaEdit"."""
+    files = []
+
+    for argument in arguments:
+        if argument.startswith("file://"):
+            argument = QUrl(argument).toLocalFile()
+        elif argument.startswith("-"):
+            continue
+
+        if argument:
+            files.append(str(Path(argument).expanduser().resolve()))
+
+    return files
+
+
+def send_to_running_copy(files):
+    """If TelaEdit is already running, gives it the files to open and
+    returns True. Returns False if this is the only copy."""
+    socket = QLocalSocket()
+    socket.connectToServer(INSTANCE_SERVER_NAME)
+
+    if not socket.waitForConnected(500):
+        return False
+
+    socket.write(json.dumps(files).encode("utf-8"))
+    socket.waitForBytesWritten(1000)
+    socket.disconnectFromServer()
+
+    if socket.state() != QLocalSocket.LocalSocketState.UnconnectedState:
+        socket.waitForDisconnected(1000)
+
+    return True
+
+
+start_files = files_from_arguments(sys.argv[1:])
+
+if send_to_running_copy(start_files):
+    sys.exit(0)
+
+window = TelaEdit(start_files)
+window.start_listening()
 
 if window.restore_maximized:
     window.showMaximized()
