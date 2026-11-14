@@ -8,6 +8,7 @@ import html
 import subprocess
 import sys
 import re
+import difflib
 import shlex
 import shutil
 import stat
@@ -23,7 +24,7 @@ OLD_CONFIG_DIR = Path.home() / ".config" / "SiteForge"
 STATE_FILE = CONFIG_DIR / "state.json"
 # The version shown in Help > About. Change this for each new release,
 # and use the same number when you run make-release.sh.
-APP_VERSION = "0.6"
+APP_VERSION = "0.7"
 
 SHORTCUTS_FILE = CONFIG_DIR / "shortcuts.json"
 BROWSERS_FILE = CONFIG_DIR / "browsers.json"
@@ -45,6 +46,81 @@ OTHER_ICON_CHOICE = "__other__"
 # scaled to this size. DEFAULT_TOOLBAR_ICON_SIZE is used until you choose one.
 TOOLBAR_ICON_SIZES = (20, 24, 32)
 DEFAULT_TOOLBAR_ICON_SIZE = 24
+
+# The extra tag tabs on the toolbar (also in the Insert menu). Each tag is:
+# (tag name, label, opening text, closing text). An empty closing text is
+# for tags with no end tag, such as <br>. The icon is icons/tags/<name>.png
+# (the Table icon comes from icons/menu/table.png).
+# When nothing is selected, the cursor goes inside the first empty "" if
+# there is one, otherwise between the opening and closing tags.
+TAG_TABS = [
+    ("Tables", [
+        ("table", "Table", "<table>\n", "\n</table>"),
+        ("caption", "Table caption (caption)", "<caption>", "</caption>"),
+        ("thead", "Table head (thead)", "<thead>\n", "\n</thead>"),
+        ("tbody", "Table body (tbody)", "<tbody>\n", "\n</tbody>"),
+        ("tfoot", "Table foot (tfoot)", "<tfoot>\n", "\n</tfoot>"),
+        ("tr", "Table row (tr)", "<tr>", "</tr>"),
+        ("th", "Table heading cell (th)", "<th>", "</th>"),
+        ("td", "Table cell (td)", "<td>", "</td>"),
+    ]),
+    ("Forms", [
+        ("form", "Form", '<form action="" method="post">\n', "\n</form>"),
+        ("fieldset", "Fieldset", "<fieldset>\n", "\n</fieldset>"),
+        ("legend", "Legend", "<legend>", "</legend>"),
+        ("label", "Label", '<label for="">', "</label>"),
+        ("input", "Input", '<input type="text" name="" id="">', ""),
+        ("textarea", "Text area", '<textarea name="" id="" rows="4" cols="40">', "</textarea>"),
+        ("select", "Select (drop-down list)", '<select name="" id="">\n', "\n</select>"),
+        ("option", "Option", '<option value="">', "</option>"),
+        ("button", "Button", '<button type="submit">', "</button>"),
+    ]),
+    ("HTML 5", [
+        ("header", "Header", "<header>\n", "\n</header>"),
+        ("nav", "Navigation (nav)", "<nav>\n", "\n</nav>"),
+        ("main", "Main", "<main>\n", "\n</main>"),
+        ("section", "Section", "<section>\n", "\n</section>"),
+        ("article", "Article", "<article>\n", "\n</article>"),
+        ("aside", "Aside", "<aside>\n", "\n</aside>"),
+        ("footer", "Footer", "<footer>\n", "\n</footer>"),
+        ("figure", "Figure", "<figure>\n", "\n</figure>"),
+        ("figcaption", "Figure caption (figcaption)", "<figcaption>", "</figcaption>"),
+    ]),
+    ("Media", [
+        ("picture", "Picture", "<picture>\n", "\n</picture>"),
+        ("source", "Source", '<source srcset="" type="">', ""),
+        ("video", "Video", '<video src="" controls>', "</video>"),
+        ("audio", "Audio", '<audio src="" controls>', "</audio>"),
+        ("track", "Track (subtitles)", '<track src="" kind="captions" srclang="en">', ""),
+        ("canvas", "Canvas", '<canvas width="300" height="150">', "</canvas>"),
+        ("iframe", "Inline frame (iframe)", '<iframe src="" width="560" height="315">', "</iframe>"),
+    ]),
+    ("Text", [
+        ("div", "Division (div)", "<div>", "</div>"),
+        ("span", "Span", "<span>", "</span>"),
+        ("pre", "Preformatted (pre)", "<pre>", "</pre>"),
+        ("code", "Code", "<code>", "</code>"),
+        ("kbd", "Keyboard input (kbd)", "<kbd>", "</kbd>"),
+        ("q", "Short quote (q)", "<q>", "</q>"),
+        ("cite", "Citation (cite)", "<cite>", "</cite>"),
+        ("abbr", "Abbreviation (abbr)", '<abbr title="">', "</abbr>"),
+        ("time", "Time", '<time datetime="">', "</time>"),
+        ("mark", "Highlight (mark)", "<mark>", "</mark>"),
+        ("small", "Small print (small)", "<small>", "</small>"),
+        ("del", "Deleted text (del)", "<del>", "</del>"),
+        ("ins", "Inserted text (ins)", "<ins>", "</ins>"),
+        ("br", "Line break (br)", "<br>", ""),
+    ]),
+]
+
+# Extra buttons for the Lists tab (after Unordered and Ordered List).
+# Same layout as TAG_TABS; icons are in icons/tags as well.
+LIST_TAGS = [
+    ("li", "List item (li)", "<li>", "</li>"),
+    ("dl", "Definition list (dl)", "<dl>\n", "\n</dl>"),
+    ("dt", "Definition term (dt)", "<dt>", "</dt>"),
+    ("dd", "Definition (dd)", "<dd>", "</dd>"),
+]
 
 # Set to True when the settings were copied from the old SiteForge folder
 # during this start-up, so the window can say so.
@@ -124,7 +200,7 @@ def browser_icon(icon_name):
 
 from html.parser import HTMLParser
 from PyQt6.QtCore import (
-    Qt, QUrl, QDir, QSize, QTimer, QSortFilterProxyModel,
+    Qt, QUrl, QDir, QSize, QTimer, QSortFilterProxyModel, QCollator,
     QT_VERSION_STR, PYQT_VERSION_STR
 )
 from PyQt6.QtGui import QDesktopServices, QTextCursor, QShortcut, QAction, QFont, QFileSystemModel, QColor, QIcon, QKeySequence, QPixmap, QPalette, QBrush
@@ -1293,6 +1369,465 @@ class CodeEditor(QsciScintilla):
         return True
 
 
+# ---------------------------------------------------------------------------
+# CSS checker (Tools > Check CSS)
+#
+# A small offline check for the everyday mistakes: missing or extra braces,
+# missing colons and semicolons, misspelt property names, unknown units,
+# numbers that need a unit, bad hex colours and unclosed comments or quotes.
+# It is not a full validator: for a complete check use the W3C CSS
+# validator (Tools > Check CSS online).
+# ---------------------------------------------------------------------------
+
+CSS_KNOWN_PROPERTIES = set("""
+align-content align-items align-self all animation animation-delay
+animation-direction animation-duration animation-fill-mode
+animation-iteration-count animation-name animation-play-state
+animation-timing-function appearance aspect-ratio backdrop-filter
+backface-visibility background background-attachment background-blend-mode
+background-clip background-color background-image background-origin
+background-position background-position-x background-position-y
+background-repeat background-size behavior block-size border border-block
+border-block-end border-block-start border-bottom border-bottom-color
+border-bottom-left-radius border-bottom-right-radius border-bottom-style
+border-bottom-width border-collapse border-color border-image
+border-image-outset border-image-repeat border-image-slice
+border-image-source border-image-width border-inline border-inline-end
+border-inline-start border-left border-left-color border-left-style
+border-left-width border-radius border-right border-right-color
+border-right-style border-right-width border-spacing border-style border-top
+border-top-color border-top-left-radius border-top-right-radius
+border-top-style border-top-width border-width bottom box-decoration-break
+box-shadow box-sizing break-after break-before break-inside caption-side
+caret-color clear clip clip-path color color-scheme column-count column-fill
+column-gap column-rule column-rule-color column-rule-style column-rule-width
+column-span column-width columns contain container container-name
+container-type content content-visibility counter-increment counter-reset
+counter-set cursor direction display empty-cells filter flex flex-basis
+flex-direction flex-flow flex-grow flex-shrink flex-wrap float font
+font-display font-family font-feature-settings font-kerning font-size
+font-size-adjust font-stretch font-style font-variant font-variant-caps
+font-variant-ligatures font-variant-numeric font-weight gap grid grid-area
+grid-auto-columns grid-auto-flow grid-auto-rows grid-column grid-column-end
+grid-column-gap grid-column-start grid-gap grid-row grid-row-end
+grid-row-gap grid-row-start grid-template grid-template-areas
+grid-template-columns grid-template-rows hanging-punctuation height hyphens
+image-rendering inline-size inset inset-block inset-inline isolation
+justify-content justify-items justify-self left letter-spacing line-break
+line-height list-style list-style-image list-style-position list-style-type
+margin margin-block margin-block-end margin-block-start margin-bottom
+margin-inline margin-inline-end margin-inline-start margin-left margin-right
+margin-top mask mask-image max-block-size max-height max-inline-size
+max-width min-block-size min-height min-inline-size min-width mix-blend-mode
+object-fit object-position opacity order orphans outline outline-color
+outline-offset outline-style outline-width overflow overflow-wrap overflow-x
+overflow-y overscroll-behavior padding padding-block padding-block-end
+padding-block-start padding-bottom padding-inline padding-inline-end
+padding-inline-start padding-left padding-right padding-top page-break-after
+page-break-before page-break-inside perspective perspective-origin
+place-content place-items place-self pointer-events position quotes resize
+right rotate row-gap scale scroll-behavior scroll-margin scroll-margin-top
+scroll-padding scroll-padding-top scroll-snap-align scroll-snap-type
+scrollbar-color scrollbar-gutter scrollbar-width shape-outside speak src
+tab-size table-layout text-align text-align-last text-decoration
+text-decoration-color text-decoration-line text-decoration-style
+text-decoration-thickness text-emphasis text-indent text-justify
+text-orientation text-overflow text-rendering text-shadow text-transform
+text-underline-offset text-underline-position top touch-action transform
+transform-origin transform-style transition transition-delay
+transition-duration transition-property transition-timing-function
+translate unicode-bidi unicode-range user-select vertical-align visibility
+white-space widows width will-change word-break word-spacing word-wrap
+writing-mode z-index zoom
+ascent-override descent-override line-gap-override size-adjust
+font-named-instance size marks bleed
+""".split())
+
+# Properties where a plain number (other than 0) needs a unit, such as px
+CSS_LENGTH_PROPERTIES = set("""
+width height min-width max-width min-height max-height
+margin margin-top margin-right margin-bottom margin-left
+padding padding-top padding-right padding-bottom padding-left
+top right bottom left inset font-size letter-spacing word-spacing
+text-indent border border-top border-right border-bottom border-left
+border-width border-top-width border-right-width border-bottom-width
+border-left-width border-radius border-top-left-radius
+border-top-right-radius border-bottom-left-radius border-bottom-right-radius
+border-spacing outline outline-width outline-offset background-position
+background-size box-shadow text-shadow vertical-align gap row-gap
+column-gap column-width flex-basis
+""".split())
+
+CSS_UNITS = set("""
+px em rem % ex ch vw vh vmin vmax cm mm in pt pc q deg rad grad turn s ms
+hz khz dpi dpcm dppx x fr lh rlh vb vi svh lvh dvh svw lvw dvw cqw cqh cqi
+cqb cqmin cqmax
+""".split())
+
+# @-rules whose { } hold more rules rather than property: value pairs
+CSS_RULE_BLOCK_AT_RULES = (
+    "@media", "@supports", "@document", "@-moz-document", "@layer",
+    "@container", "@keyframes", "@-webkit-keyframes", "@-moz-keyframes",
+    "@-o-keyframes",
+)
+
+
+class CSSChecker:
+    """Checks CSS text. Each problem is (offset, kind, message), where the
+    offset counts characters from the start of the text given, and kind is
+    "Error" or "Warning"."""
+
+    def __init__(self):
+        self.problems = []
+
+    def add(self, offset, kind, message):
+        self.problems.append((offset, kind, message))
+
+    # ---- Step 1: blank out comments, strings and url(...) -----------------
+    # They are replaced by spaces (new lines are kept) so that braces and
+    # semicolons inside them don't confuse the rest of the check. The
+    # positions of everything else stay the same.
+
+    def mask(self, text):
+        out = list(text)
+        length = len(text)
+        i = 0
+
+        def blank(start, end):
+            for k in range(start, end):
+                if out[k] != "\n":
+                    out[k] = " "
+
+        while i < length:
+            ch = text[i]
+
+            if text.startswith("/*", i):
+                end = text.find("*/", i + 2)
+                if end < 0:
+                    self.add(i, "Error", "comment is never closed (missing */)")
+                    blank(i, length)
+                    return "".join(out)
+                blank(i, end + 2)
+                i = end + 2
+                continue
+
+            if ch in "\"'":
+                k = i + 1
+                while k < length and text[k] != ch and text[k] != "\n":
+                    if text[k] == "\\":
+                        k += 1
+                    k += 1
+                if k >= length or text[k] != ch:
+                    self.add(i, "Error", f"quote {ch} is never closed on this line")
+                    blank(i + 1, k)
+                    i = k
+                    continue
+                blank(i + 1, k)
+                i = k + 1
+                continue
+
+            if text[i:i + 4].lower() == "url(":
+                k = i + 4
+                while k < length and text[k] in " \t":
+                    k += 1
+                if k < length and text[k] not in "\"'":
+                    end = text.find(")", k)
+                    if end < 0:
+                        self.add(i, "Error", "url( is never closed (missing ))")
+                        blank(i + 4, length)
+                        return "".join(out)
+                    blank(i + 4, end)
+                    i = end + 1
+                    continue
+
+            i += 1
+
+        return "".join(out)
+
+    # ---- Step 2: walk through the rules -----------------------------------
+
+    def check_stylesheet(self, text):
+        self.text = text
+        masked = self.mask(text)
+        self.masked = masked
+
+        stack = []  # open blocks: [kind, offset of "{", declarations seen, values]
+        seg_start = 0
+        paren_depth = 0
+
+        def kind_now():
+            return stack[-1][0] if stack else "rules"
+
+        for i, ch in enumerate(masked):
+            if kind_now() == "rules":
+                if ch == "{":
+                    prelude = masked[seg_start:i]
+                    stripped = prelude.strip()
+                    if not stripped:
+                        self.add(i, "Error", "'{' with no selector before it")
+                        block_kind = "decls"
+                    elif stripped.lower().startswith(CSS_RULE_BLOCK_AT_RULES):
+                        block_kind = "rules"
+                    else:
+                        block_kind = "decls"
+                        if not stripped.startswith("@"):
+                            self.check_selector(seg_start, prelude)
+                    stack.append([block_kind, i, 0, {}])
+                    seg_start = i + 1
+                elif ch == ";":
+                    stripped = masked[seg_start:i].strip()
+                    if stripped and not stripped.startswith("@"):
+                        self.add(
+                            self.first_char(seg_start, i), "Error",
+                            f"'{self.original(seg_start, i)}' is outside any "
+                            "rule (is a '{' missing?)"
+                        )
+                    seg_start = i + 1
+                elif ch == "}":
+                    stripped = masked[seg_start:i].strip()
+                    if stripped:
+                        self.add(
+                            self.first_char(seg_start, i), "Error",
+                            f"'{self.original(seg_start, i)}' is not part of "
+                            "a rule (is a '{' missing?)"
+                        )
+                    if stack:
+                        stack.pop()
+                    else:
+                        self.add(i, "Error", "extra '}' with no matching '{'")
+                    seg_start = i + 1
+            else:
+                # Inside a rule: property: value; pairs
+                if ch == "(":
+                    paren_depth += 1
+                elif ch == ")":
+                    paren_depth = max(0, paren_depth - 1)
+                elif ch == ";" and paren_depth == 0:
+                    self.check_declaration(seg_start, i, stack[-1])
+                    seg_start = i + 1
+                elif ch == "}":
+                    paren_depth = 0
+                    self.check_declaration(seg_start, i, stack[-1])
+                    block = stack.pop()
+                    if block[2] == 0:
+                        self.add(block[1], "Warning", "empty rule (nothing between { and })")
+                    seg_start = i + 1
+                elif ch == "{":
+                    self.add(
+                        i, "Error",
+                        "'{' inside a rule: is a '}' missing before this?"
+                    )
+                    # Carry on as if this were a new rule
+                    stack.append(["decls", i, 0, {}])
+                    seg_start = i + 1
+                    paren_depth = 0
+
+        leftover = masked[seg_start:].strip()
+
+        if leftover and not stack:
+            self.add(
+                self.first_char(seg_start, len(masked)), "Error",
+                f"'{self.original(seg_start, len(masked))}' is unfinished "
+                "(missing '{' or ';'?)"
+            )
+        elif leftover and kind_now() == "decls":
+            self.check_declaration(seg_start, len(masked), stack[-1])
+
+        for block in stack:
+            self.add(block[1], "Error", "'{' is never closed (missing '}')")
+
+        return self.problems
+
+    def check_declarations(self, text):
+        """Checks the inside of a style="..." attribute."""
+        self.text = text
+        masked = self.mask(text)
+        self.masked = masked
+        block = ["decls", 0, 0, {}]
+        seg_start = 0
+        paren_depth = 0
+
+        for i, ch in enumerate(masked):
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                paren_depth = max(0, paren_depth - 1)
+            elif ch == ";" and paren_depth == 0:
+                self.check_declaration(seg_start, i, block)
+                seg_start = i + 1
+            elif ch in "{}":
+                self.add(i, "Error", f"'{ch}' is not allowed in a style attribute")
+
+        self.check_declaration(seg_start, len(masked), block)
+        return self.problems
+
+    # ---- Helpers -----------------------------------------------------------
+
+    def first_char(self, start, end):
+        """Offset of the first non-space character in start..end."""
+        k = start
+        while k < end and self.masked[k].isspace():
+            k += 1
+        return k
+
+    def original(self, start, end, limit=40):
+        """The original text, tidied up and shortened for a message."""
+        words = " ".join(self.text[start:end].split())
+        return words if len(words) <= limit else words[:limit - 3] + "..."
+
+    def check_selector(self, start, prelude):
+        stripped = prelude.strip()
+        offset = self.first_char(start, start + len(prelude))
+
+        if stripped.endswith(","):
+            self.add(offset, "Error", f"selector '{self.original(start, start + len(prelude))}' ends with a comma")
+        elif ",," in "".join(stripped.split()):
+            self.add(offset, "Error", "two commas in a row in the selector")
+
+        if ";" in stripped or ":" == stripped[-1:]:
+            self.add(offset, "Error", f"selector '{self.original(start, start + len(prelude))}' looks wrong")
+
+    def check_declaration(self, start, end, block):
+        masked = self.masked[start:end]
+
+        if not masked.strip():
+            return
+
+        block[2] += 1
+        first = self.first_char(start, end)
+
+        colon = masked.find(":")
+        if colon < 0:
+            self.add(
+                first, "Error",
+                f"missing ':' in '{self.original(start, end)}' "
+                "(should be property: value)"
+            )
+            return
+
+        # A property name followed later by another 'name:' on a new line
+        # means a ';' was forgotten at the end of a line
+        value_start = start + colon + 1
+        value = self.masked[value_start:end]
+        missing = re.search(r"\n[ \t]*(-?[A-Za-z][A-Za-z0-9-]*)[ \t]*:", value)
+
+        if missing and missing.group(1).lower() in CSS_KNOWN_PROPERTIES:
+            newline = value_start + missing.start()
+            before = self.masked[value_start:newline].rstrip()
+            line_end = value_start + len(before)
+            self.add(
+                line_end, "Error",
+                f"missing ';' after '{self.original(value_start, line_end)}'"
+            )
+            self.check_one_declaration(start, colon, line_end, block)
+            self.check_declaration(newline + 1, end, block)
+            block[2] -= 1
+            return
+
+        self.check_one_declaration(start, colon, end, block)
+
+    def check_one_declaration(self, start, colon, end, block):
+        name_text = self.text[start:start + colon]
+        name = name_text.strip()
+        name_offset = self.first_char(start, start + colon)
+        value_start = start + colon + 1
+        value = self.masked[value_start:end]
+        lower = name.lower()
+
+        if not name:
+            self.add(name_offset, "Error", "':' with no property name before it")
+            return
+
+        # Old Internet Explorer hacks (*zoom, _height) are left alone
+        hack = lower[:1] in "*_"
+        check_name = lower[1:] if hack else lower
+
+        if not re.fullmatch(r"-?-?[a-z][a-z0-9-]*", check_name):
+            self.add(name_offset, "Error", f"'{name}' is not a valid property name")
+        elif not check_name.startswith("-") and check_name not in CSS_KNOWN_PROPERTIES:
+            close = difflib.get_close_matches(check_name, CSS_KNOWN_PROPERTIES, n=1, cutoff=0.75)
+            if close:
+                self.add(name_offset, "Error", f"unknown property '{name}': did you mean '{close[0]}'?")
+            else:
+                self.add(name_offset, "Warning", f"unknown property '{name}'")
+
+        if not value.strip():
+            self.add(name_offset, "Error", f"'{name}' has no value")
+            return
+
+        if value.count("(") != value.count(")"):
+            self.add(
+                self.first_char(value_start, end), "Error",
+                f"brackets ( ) don't match in the value of '{name}'"
+            )
+
+        # !important spelt wrongly
+        for match in re.finditer(r"!\s*([A-Za-z]+)", value):
+            if match.group(1).lower() != "important":
+                self.add(value_start + match.start(), "Error", f"'!{match.group(1)}' should be '!important'")
+
+        # Hex colours: #rgb, #rgba, #rrggbb or #rrggbbaa
+        for match in re.finditer(r"#([0-9A-Za-z]*)", value):
+            digits = match.group(1)
+            if not re.fullmatch(r"[0-9A-Fa-f]+", digits or "x") or len(digits) not in (3, 4, 6, 8):
+                self.add(
+                    value_start + match.start(), "Error",
+                    f"'#{digits}' is not a valid colour (use 3 or 6 hex digits, 0-9 and a-f)"
+                )
+
+        if check_name in ("unicode-range", "filter", "-ms-filter"):
+            return
+
+        # Numbers and their units
+        for match in re.finditer(r"(?<![\w#.\-])(-?(?:\d+\.?\d*|\.\d+))([A-Za-z%]*)", value):
+            number, unit = match.group(1), match.group(2)
+            offset = value_start + match.start()
+
+            if unit:
+                if unit.lower() not in CSS_UNITS and unit.lower() != "e":
+                    self.add(offset, "Error", f"unknown unit '{unit}' in '{number}{unit}'")
+            elif check_name in CSS_LENGTH_PROPERTIES and float(number) != 0:
+                # A number straight after '/' in font or border-radius is fine
+                if self.masked[max(value_start, offset - 1):offset].strip() == "/":
+                    continue
+                self.add(offset, "Error", f"'{number}' in '{name}' needs a unit, such as {number}px")
+
+        # The same property twice with the same value
+        values = block[3]
+        normal = " ".join(self.text[value_start:end].split()).lower()
+        if values.get(lower) == normal:
+            self.add(name_offset, "Warning", f"'{name}' is set twice with the same value")
+        values[lower] = normal
+
+
+def check_css_text(text):
+    """Checks a whole stylesheet. Returns (offset, kind, message) tuples."""
+    return CSSChecker().check_stylesheet(text)
+
+
+def check_css_in_html(text):
+    """Checks the CSS inside <style> blocks and style="..." attributes of an
+    HTML page. Returns (offset, kind, message) tuples, with offsets into the
+    whole page, and the number of places checked."""
+    problems = []
+    places = 0
+
+    for match in re.finditer(r"<style\b[^>]*>(.*?)</style\s*>", text, re.IGNORECASE | re.DOTALL):
+        places += 1
+        start = match.start(1)
+        for offset, kind, message in check_css_text(match.group(1)):
+            problems.append((start + offset, kind, message))
+
+    for match in re.finditer(r"""\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')""", text, re.IGNORECASE):
+        places += 1
+        group = 1 if match.group(1) is not None else 2
+        start = match.start(group)
+        for offset, kind, message in CSSChecker().check_declarations(match.group(group)):
+            problems.append((start + offset, kind, message))
+
+    return problems, places
+
+
 class ClickableOutput(QTextEdit):
     """Read-only output box. Clicking a line that mentions
     'line N column M' (as HTML Tidy writes it) jumps to that spot."""
@@ -1722,7 +2257,15 @@ class FolderStateIconDelegate(QStyledItemDelegate):
         super().initStyleOption(option, index)
         model = index.model()
 
-        if index.column() == 0 and model.isDir(index):
+        # The folder tree now sits behind a sorting model, so ask the
+        # real file system model whether this row is a folder
+        if hasattr(model, "mapToSource"):
+            source_index = model.mapToSource(index)
+            is_folder = source_index.model().isDir(source_index)
+        else:
+            is_folder = model.isDir(index)
+
+        if index.column() == 0 and is_folder:
             if self.view.isExpanded(index):
                 option.icon = self.open_icon
             else:
@@ -1736,6 +2279,26 @@ class DraggableFileSystemModel(QFileSystemModel):
         if index.isValid() and not self.isDir(index):
             return default_flags | Qt.ItemFlag.ItemIsDragEnabled
         return default_flags
+
+
+class FolderSortProxyModel(QSortFilterProxyModel):
+    """Sits between the folder model and the upper Explorer panel and keeps
+    the folders in alphabetical order: upper and lower case treated alike,
+    and numbers in number order ("Day 2" before "Day 10"). Folders that
+    load later, as you open them, are sorted as they arrive."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.collator = QCollator()
+        self.collator.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.collator.setNumericMode(True)
+        self.setDynamicSortFilter(True)
+
+    def lessThan(self, left, right):
+        model = self.sourceModel()
+        return self.collator.compare(
+            model.fileName(left), model.fileName(right)
+        ) < 0
 
 
 class FilesOnlyProxyModel(QSortFilterProxyModel):
@@ -1819,6 +2382,9 @@ class TelaEdit(QMainWindow):
 
         self.restore_maximized = window_data.get("window_maximized", False)
         self.saved_explorer_width = window_data.get("explorer_width", 250)
+
+        # Settings > Explorer on the right (off: on the left, as before)
+        self.explorer_on_right = bool(window_data.get("explorer_on_right", False))
         self.saved_explorer_split = window_data.get("explorer_split", [])
 
         self.tabs = QTabWidget()
@@ -1892,8 +2458,13 @@ class TelaEdit(QMainWindow):
         self.folder_model.setRootPath(self.last_directory)
         self.folder_model.setIconProvider(self.icon_provider)
 
+        # The sorting model keeps the folders in alphabetical order
+        self.folder_proxy = FolderSortProxyModel(self)
+        self.folder_proxy.setSourceModel(self.folder_model)
+        self.folder_proxy.sort(0, Qt.SortOrder.AscendingOrder)
+
         self.folder_tree = QTreeView()
-        self.folder_tree.setModel(self.folder_model)
+        self.folder_tree.setModel(self.folder_proxy)
         self.folder_tree.setItemDelegate(
             FolderStateIconDelegate(self.folder_tree)
         )
@@ -1939,6 +2510,10 @@ class TelaEdit(QMainWindow):
         self.file_model.setRootPath(self.last_directory)
         self.file_model.setIconProvider(self.icon_provider)
         self.file_model.directoryLoaded.connect(self.on_file_directory_loaded)
+
+        # Keep the files in alphabetical order too (same rules as the
+        # folders). The proxy below keeps this order as it is.
+        self.file_model.sort(0, Qt.SortOrder.AscendingOrder)
 
         # The proxy hides the sub-folders, so only files are listed
         self.file_proxy = FilesOnlyProxyModel(self)
@@ -2004,12 +2579,14 @@ class TelaEdit(QMainWindow):
         title_layout.addWidget(title_label)
         title_layout.addStretch()
 
+        # Its arrow points towards the side the Explorer is on
+        # (set in apply_explorer_side)
         collapse_button = QToolButton(title_bar)
-        collapse_button.setArrowType(Qt.ArrowType.LeftArrow)
         collapse_button.setToolTip("Hide Explorer")
         collapse_button.setAutoRaise(True)
         collapse_button.clicked.connect(self.toggle_explorer_panel)
         title_layout.addWidget(collapse_button)
+        self.explorer_collapse_button = collapse_button
 
         dock.setTitleBarWidget(title_bar)
         self.explorer_tabs.addTab(self.explorer_splitter, "Explorer")
@@ -2035,19 +2612,21 @@ class TelaEdit(QMainWindow):
         self.refresh_snippet_list()
 
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
-        self.resizeDocks([dock], [self.saved_explorer_width], Qt.Orientation.Horizontal)
 
-        # Create the expand button toolbar on the left edge (hidden by default)
+        # The expand button strip, shown at the window edge when the
+        # Explorer is hidden (hidden to start with)
         self.expand_toolbar = QToolBar("Expand Explorer", self)
         self.expand_toolbar.setMovable(False)
         self.expand_explorer_btn = QToolButton(self)
-        self.expand_explorer_btn.setArrowType(Qt.ArrowType.RightArrow)
         self.expand_explorer_btn.setToolTip("Expand Explorer")
         self.expand_explorer_btn.setAutoRaise(True)
         self.expand_explorer_btn.clicked.connect(self.toggle_explorer_panel)
         self.expand_toolbar.addWidget(self.expand_explorer_btn)
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.expand_toolbar)
         self.expand_toolbar.hide()
+
+        # Put the Explorer on the chosen side (left or right)
+        self.apply_explorer_side(self.saved_explorer_width)
 
         dock.visibilityChanged.connect(self.on_dock_visibility_changed)
 
@@ -2062,6 +2641,64 @@ class TelaEdit(QMainWindow):
         else:
             self.file_dock.show()
             self.expand_toolbar.hide()
+
+    def apply_explorer_side(self, width=None):
+        """Puts the Explorer panel, and the strip with its expand button,
+        on the left or right of the window, and points the arrows the
+        right way."""
+        if width is None:
+            width = self.file_dock.width()
+
+        was_visible = not self.file_dock.isHidden()
+
+        if self.explorer_on_right:
+            dock_area = Qt.DockWidgetArea.RightDockWidgetArea
+            toolbar_area = Qt.ToolBarArea.RightToolBarArea
+            hide_arrow = Qt.ArrowType.RightArrow
+            show_arrow = Qt.ArrowType.LeftArrow
+        else:
+            dock_area = Qt.DockWidgetArea.LeftDockWidgetArea
+            toolbar_area = Qt.ToolBarArea.LeftToolBarArea
+            hide_arrow = Qt.ArrowType.LeftArrow
+            show_arrow = Qt.ArrowType.RightArrow
+
+        if self.dockWidgetArea(self.file_dock) != dock_area:
+            self.addDockWidget(dock_area, self.file_dock)
+
+        if self.toolBarArea(self.expand_toolbar) != toolbar_area:
+            self.addToolBar(toolbar_area, self.expand_toolbar)
+
+        # Moving things can briefly hide and show them, so set both
+        # back to how they were: the expand strip only shows when the
+        # Explorer is hidden
+        self.file_dock.setVisible(was_visible)
+        self.expand_toolbar.setVisible(not was_visible)
+        self.explorer_collapse_button.setArrowType(hide_arrow)
+        self.expand_explorer_btn.setArrowType(show_arrow)
+
+        self.resizeDocks([self.file_dock], [width], Qt.Orientation.Horizontal)
+
+    def toggle_explorer_side(self, checked):
+        """Settings > Explorer on the right."""
+        self.explorer_on_right = bool(checked)
+        self.apply_explorer_side()
+
+        # Save straight away, so the choice is kept even if TelaEdit
+        # is not closed normally
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+
+        data["explorer_on_right"] = self.explorer_on_right
+
+        try:
+            STATE_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        except OSError:
+            pass
+
+        side = "right" if self.explorer_on_right else "left"
+        self.status.showMessage(f"The Explorer is now on the {side}.", 5000)
 
     def on_dock_visibility_changed(self, visible):
         """Ensures the expand button stays synchronized if visibility changes."""
@@ -2091,7 +2728,7 @@ class TelaEdit(QMainWindow):
         if not Path(path).is_dir():
             return
 
-        index = self.folder_model.index(path)
+        index = self.folder_proxy.mapFromSource(self.folder_model.index(path))
 
         if not index.isValid():
             return
@@ -2123,7 +2760,9 @@ class TelaEdit(QMainWindow):
         if not self.explorer_folder:
             return
 
-        index = self.folder_model.index(self.explorer_folder)
+        index = self.folder_proxy.mapFromSource(
+            self.folder_model.index(self.explorer_folder)
+        )
 
         if index.isValid():
             self.folder_tree.scrollTo(
@@ -2135,7 +2774,7 @@ class TelaEdit(QMainWindow):
         if not current.isValid():
             return
 
-        path = self.folder_model.filePath(current)
+        path = self.folder_model.filePath(self.folder_proxy.mapToSource(current))
 
         if Path(path).is_dir():
             self.show_folder_files(path)
@@ -2178,6 +2817,67 @@ class TelaEdit(QMainWindow):
         if path == self.explorer_folder:
             self.refresh_file_list_root()
 
+    def show_file_in_file_manager(self, file_path):
+        """Opens the file's folder in the system's file manager with the file
+        already selected. This uses the standard desktop request
+        (org.freedesktop.FileManager1 ShowItems), which Nemo, Nautilus,
+        Dolphin, Thunar and PCManFM-Qt understand. If the file manager does
+        not answer it, the folder is simply opened as before."""
+        file_path = Path(file_path)
+
+        if not file_path.exists():
+            self.status.showMessage("That file no longer exists.", 5000)
+            return
+
+        # as_uri() also encodes spaces, commas and other awkward characters
+        uri = file_path.resolve().as_uri()
+
+        commands = []
+
+        dbus_send = shutil.which("dbus-send")
+        if dbus_send:
+            commands.append([
+                dbus_send, "--session", "--print-reply",
+                "--dest=org.freedesktop.FileManager1",
+                "--type=method_call",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+                "array:string:" + uri,
+                "string:"
+            ])
+
+        gdbus = shutil.which("gdbus")
+        if gdbus:
+            commands.append([
+                gdbus, "call", "--session",
+                "--dest", "org.freedesktop.FileManager1",
+                "--object-path", "/org/freedesktop/FileManager1",
+                "--method", "org.freedesktop.FileManager1.ShowItems",
+                "['" + uri + "']", ""
+            ])
+
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    command,
+                    env=external_program_env(),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5
+                )
+            except subprocess.TimeoutExpired:
+                # The file manager is probably still starting up and will
+                # show the file; don't open a second window as well
+                return
+            except OSError:
+                continue
+
+            if result.returncode == 0:
+                return
+
+        # Nothing answered the request: just open the folder
+        self.open_in_file_manager(file_path.parent)
+
     def open_in_file_manager(self, folder):
         """Opens a folder in the system's file manager."""
         folder = Path(folder)
@@ -2215,7 +2915,7 @@ class TelaEdit(QMainWindow):
         index = self.folder_tree.indexAt(position)
 
         if index.isValid():
-            folder = self.folder_model.filePath(index)
+            folder = self.folder_model.filePath(self.folder_proxy.mapToSource(index))
         else:
             folder = self.explorer_folder
 
@@ -2241,12 +2941,15 @@ class TelaEdit(QMainWindow):
                 lambda checked=False, p=path: self.open_path(p)
             )
             menu.addSeparator()
-            label = "Open folder in file manager"
-        else:
-            label = "Open in file manager"
 
-        if self.explorer_folder:
-            manager_action = menu.addAction(label)
+            # Opens the folder with this file already selected
+            manager_action = menu.addAction("Open in file manager")
+            manager_action.triggered.connect(
+                lambda checked=False, p=path: self.show_file_in_file_manager(p)
+            )
+
+        elif self.explorer_folder:
+            manager_action = menu.addAction("Open in file manager")
             manager_action.triggered.connect(
                 lambda checked=False, f=self.explorer_folder:
                     self.open_in_file_manager(f)
@@ -2433,6 +3136,7 @@ class TelaEdit(QMainWindow):
         data["bookmarks"] = bookmarks
         data["word_wrap"] = self.actions["wordwrap"].isChecked()
         data["tag_completion_enabled"] = self.actions["tag_completion"].isChecked()
+        data["strong_em_tags"] = self.actions["strong_em"].isChecked()
         data["spell_check_enabled"] = self.actions["spellcheck"].isChecked()
         data["spell_language"] = SPELLER.language
         data["spell_style"] = SPELLER.style
@@ -2451,6 +3155,7 @@ class TelaEdit(QMainWindow):
         }
         data["window_maximized"] = self.isMaximized()
         data["explorer_width"] = self.file_dock.width()
+        data["explorer_on_right"] = self.explorer_on_right
         data["explorer_split"] = self.explorer_splitter.sizes()
 
         try:
@@ -2479,6 +3184,10 @@ class TelaEdit(QMainWindow):
 
         tag_comp = data.get("tag_completion_enabled", True)
         self.actions["tag_completion"].setChecked(tag_comp)
+
+        strong_em = bool(data.get("strong_em_tags", False))
+        self.actions["strong_em"].setChecked(strong_em)
+        self.update_bold_italic_tooltips()
 
         restored = False
 
@@ -2690,9 +3399,9 @@ class TelaEdit(QMainWindow):
         add("insert_h2", "Heading 2", "",
             lambda checked=False: self.insert_tag_pair("<h2>", "</h2>"))
         add("insert_bold", "Bold", "",
-            lambda checked=False: self.insert_tag_pair("<b>", "</b>"))
+            lambda checked=False: self.insert_bold_tag())
         add("insert_italic", "Italic", "",
-            lambda checked=False: self.insert_tag_pair("<i>", "</i>"))
+            lambda checked=False: self.insert_italic_tag())
         add("insert_underline", "Underline", "",
             lambda checked=False: self.insert_tag_pair("<u>", "</u>"))
         add("insert_div", "Division (div)", "",
@@ -2702,6 +3411,32 @@ class TelaEdit(QMainWindow):
         add("insert_hr", "Horizontal Rule", "", self.insert_horizontal_rule)
         add("insert_link", "Link...", "", self.insert_link)
         add("insert_image", "Image...", "", self.insert_image)
+
+        # Tools > Check CSS (offline) and Check CSS online (W3C)
+        icon_files["check_css"] = "validate.png"
+        add("check_css", "Check CSS", "", self.check_css)
+        add("check_css_online", "Check CSS online (W3C)...", "",
+            self.check_css_online)
+
+        # The extra tag tabs (Tables, Forms, HTML 5, Media, Text)
+        tag_icon_directory = Path(__file__).resolve().parent / "icons" / "tags"
+
+        for tab_name, tags in TAG_TABS + [("Lists", LIST_TAGS)]:
+            for tag, label, opening, closing in tags:
+                action_name = "tag_" + tag
+                add(action_name, label, "",
+                    lambda checked=False, o=opening, c=closing:
+                        self.insert_tag_text(o, c))
+
+                icon_path = tag_icon_directory / f"{tag}.png"
+
+                if not icon_path.is_file():
+                    icon_path = icon_directory / f"{tag}.png"
+
+                if icon_path.is_file():
+                    self.actions[action_name].setIcon(QIcon(str(icon_path)))
+
+                self.actions[action_name].setToolTip(label)
 
         panel_action = QAction("Explorer", self)
         panel_action.setCheckable(True)
@@ -2721,6 +3456,21 @@ class TelaEdit(QMainWindow):
         tag_comp_action.setChecked(True)
         tag_comp_action.triggered.connect(self.toggle_tag_completion)
         self.actions["tag_completion"] = tag_comp_action
+
+        # Settings > Bold and Italic insert <strong> and <em>
+        # Off: the Bold and Italic buttons insert <b> and <i> as before
+        strong_em_action = QAction("Bold and Italic insert <strong> and <em>", self)
+        strong_em_action.setCheckable(True)
+        strong_em_action.setChecked(False)
+        strong_em_action.triggered.connect(self.toggle_strong_em)
+        self.actions["strong_em"] = strong_em_action
+
+        # Settings > Explorer on the right (off: on the left)
+        explorer_side_action = QAction("Explorer on the right", self)
+        explorer_side_action.setCheckable(True)
+        explorer_side_action.setChecked(self.explorer_on_right)
+        explorer_side_action.triggered.connect(self.toggle_explorer_side)
+        self.actions["explorer_right"] = explorer_side_action
 
         spell_action = QAction("Spell checking", self)
         spell_action.setCheckable(True)
@@ -2884,10 +3634,14 @@ class TelaEdit(QMainWindow):
         dialog.resize(950, 420)
         layout = QVBoxLayout(dialog)
 
-        table = QTableWidget(10, 5, dialog)
+        row_count = 10
+
+        table = QTableWidget(row_count, 5, dialog)
         table.setHorizontalHeaderLabels(
             ["Browser name", "Executable path", "Browse", "Icon", "Default"]
         )
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
 
         table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
@@ -2896,86 +3650,207 @@ class TelaEdit(QMainWindow):
         default_buttons = []
         icon_boxes = []
 
-        for row, entry in enumerate(self.browser_entries):
-            table.setItem(row, 0, QTableWidgetItem(entry.get("name", "")))
-            table.setItem(row, 1, QTableWidgetItem(entry.get("command", "")))
-
-            browse_button = QPushButton("Browse...")
-            browse_button.clicked.connect(
-                lambda checked=False, r=row: self.browse_browser_executable(table, r)
-            )
-            table.setCellWidget(row, 2, browse_button)
-
-            icon_box = QComboBox()
-            icon_box.setIconSize(QSize(24, 24))
-
-            for filename in bundled_browser_icons():
-                icon_box.addItem(
-                    browser_icon(filename),
-                    filename.removesuffix(".png").replace("-", " ").replace("_", " ").title(),
-                    filename
-                )
-
-            for filename in user_browser_icons():
-                icon_box.addItem(
-                    browser_icon("user:" + filename),
-                    filename,
-                    "user:" + filename
-                )
-
-            icon_box.addItem("Other icon...", OTHER_ICON_CHOICE)
-
-            # An icon that can't be found (such as 'firefox.png' saved by an
-            # older version) leaves the first icon selected
-            icon_index = icon_box.findData(entry.get("icon", DEFAULT_BROWSER_ICON))
-            icon_box.setCurrentIndex(icon_index if icon_index >= 0 else 0)
-            icon_box.setProperty("last_index", icon_box.currentIndex())
-
-            icon_box.activated.connect(
-                lambda index, box=icon_box: self.on_browser_icon_chosen(
-                    box, icon_boxes, index
-                )
-            )
-
-            icon_boxes.append(icon_box)
-            table.setCellWidget(row, 3, icon_box)
-
-            default_button = QRadioButton()
-            default_buttons.append(default_button)
-            table.setCellWidget(row, 4, default_button)
-
-            def select_default(checked, current=row):
-                if checked:
-                    for index, button in enumerate(default_buttons):
-                        if index != current:
-                            button.setChecked(False)
-
-            default_button.toggled.connect(select_default)
-
-        selected_default = None
-
-        for row, entry in enumerate(self.browser_entries):
-            if (
-                entry.get("is_default", False)
-                and entry.get("name", "").strip()
+        def has_browser(entry):
+            return bool(
+                entry.get("name", "").strip()
                 and entry.get("command", "").strip()
-            ):
-                selected_default = row
-                break
+            )
 
-        if selected_default is None:
-            for row, entry in enumerate(self.browser_entries):
-                if (
-                    entry.get("name", "").strip()
-                    and entry.get("command", "").strip()
-                ):
-                    selected_default = row
-                    break
+        def blank_entry():
+            return {
+                "name": "", "command": "",
+                "icon": DEFAULT_BROWSER_ICON, "is_default": False
+            }
 
-        if selected_default is not None:
-            default_buttons[selected_default].setChecked(True)
+        def collect_rows():
+            """Reads what is in the table now, including anything typed
+            but not yet saved."""
+            rows = []
 
-        layout.addWidget(table)
+            for row in range(row_count):
+                name_item = table.item(row, 0)
+                command_item = table.item(row, 1)
+                icon = icon_boxes[row].currentData() or DEFAULT_BROWSER_ICON
+
+                if icon == OTHER_ICON_CHOICE:
+                    icon = DEFAULT_BROWSER_ICON
+
+                rows.append({
+                    "name": name_item.text() if name_item else "",
+                    "command": command_item.text() if command_item else "",
+                    "icon": icon,
+                    "is_default": default_buttons[row].isChecked()
+                })
+
+            return rows
+
+        def fill_table(rows, select_row=None):
+            """Fills the table from a list of browser entries. Used when the
+            dialog opens and again after Delete, Move Up or Move Down."""
+            table.clearContents()
+            default_buttons.clear()
+            icon_boxes.clear()
+
+            for row, entry in enumerate(rows):
+                table.setItem(row, 0, QTableWidgetItem(entry.get("name", "")))
+                table.setItem(row, 1, QTableWidgetItem(entry.get("command", "")))
+
+                browse_button = QPushButton("Browse...")
+                browse_button.clicked.connect(
+                    lambda checked=False, r=row: self.browse_browser_executable(table, r)
+                )
+                table.setCellWidget(row, 2, browse_button)
+
+                icon_box = QComboBox()
+                icon_box.setIconSize(QSize(24, 24))
+
+                for filename in bundled_browser_icons():
+                    icon_box.addItem(
+                        browser_icon(filename),
+                        filename.removesuffix(".png").replace("-", " ").replace("_", " ").title(),
+                        filename
+                    )
+
+                for filename in user_browser_icons():
+                    icon_box.addItem(
+                        browser_icon("user:" + filename),
+                        filename,
+                        "user:" + filename
+                    )
+
+                icon_box.addItem("Other icon...", OTHER_ICON_CHOICE)
+
+                # An icon that can't be found (such as 'firefox.png' saved by
+                # an older version) leaves the first icon selected
+                icon_index = icon_box.findData(entry.get("icon", DEFAULT_BROWSER_ICON))
+                icon_box.setCurrentIndex(icon_index if icon_index >= 0 else 0)
+                icon_box.setProperty("last_index", icon_box.currentIndex())
+
+                icon_box.activated.connect(
+                    lambda index, box=icon_box: self.on_browser_icon_chosen(
+                        box, icon_boxes, index
+                    )
+                )
+
+                icon_boxes.append(icon_box)
+                table.setCellWidget(row, 3, icon_box)
+
+                default_button = QRadioButton()
+                default_buttons.append(default_button)
+                table.setCellWidget(row, 4, default_button)
+
+                def select_default(checked, current=row):
+                    if checked:
+                        for index, button in enumerate(default_buttons):
+                            if index != current:
+                                button.setChecked(False)
+
+                default_button.toggled.connect(select_default)
+
+            # Tick the default browser: the one marked as default, or if
+            # none is, the first row with a browser in it
+            default_row = next(
+                (
+                    row for row, entry in enumerate(rows)
+                    if entry.get("is_default", False) and has_browser(entry)
+                ),
+                None
+            )
+
+            if default_row is None:
+                default_row = next(
+                    (row for row, entry in enumerate(rows) if has_browser(entry)),
+                    None
+                )
+
+            if default_row is not None:
+                default_buttons[default_row].setChecked(True)
+
+            if select_row is not None:
+                table.selectRow(select_row)
+                table.setCurrentCell(select_row, 0)
+
+        def chosen_row():
+            row = table.currentRow()
+
+            if row < 0:
+                QMessageBox.information(
+                    dialog, "Configure browsers",
+                    "Click a browser's name or path first, to choose its row."
+                )
+                return None
+
+            return row
+
+        def move_row(step):
+            row = chosen_row()
+            if row is None:
+                return
+
+            target = row + step
+
+            if target < 0 or target >= row_count:
+                return
+
+            rows = collect_rows()
+            rows[row], rows[target] = rows[target], rows[row]
+            fill_table(rows, select_row=target)
+
+        def delete_row():
+            row = chosen_row()
+            if row is None:
+                return
+
+            rows = collect_rows()
+            name = rows[row]["name"].strip()
+
+            if name or rows[row]["command"].strip():
+                answer = QMessageBox.question(
+                    dialog, "Configure browsers",
+                    f'Remove "{name or "this browser"}" from the list?'
+                )
+
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+
+            # The rows below move up, and an empty row goes on the end
+            rows.pop(row)
+            rows.append(blank_entry())
+            fill_table(rows, select_row=min(row, row_count - 1))
+
+        fill_table(self.browser_entries)
+
+        # The table, with Move Up, Move Down and Delete beside it
+        table_row = QHBoxLayout()
+        table_row.addWidget(table)
+
+        side_buttons = QVBoxLayout()
+
+        move_up_button = QPushButton("Move Up")
+        move_up_button.clicked.connect(lambda checked=False: move_row(-1))
+        side_buttons.addWidget(move_up_button)
+
+        move_down_button = QPushButton("Move Down")
+        move_down_button.clicked.connect(lambda checked=False: move_row(1))
+        side_buttons.addWidget(move_down_button)
+
+        side_buttons.addSpacing(12)
+
+        delete_button = QPushButton("Delete")
+        delete_button.clicked.connect(lambda checked=False: delete_row())
+        side_buttons.addWidget(delete_button)
+
+        side_buttons.addStretch()
+        table_row.addLayout(side_buttons)
+        layout.addLayout(table_row)
+
+        hint = QLabel(
+            "The first three browsers in the list can be opened with "
+            "Ctrl+F2, Ctrl+F3 and Ctrl+F4.",
+            dialog
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -2988,40 +3863,26 @@ class TelaEdit(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        entries = []
+        rows = collect_rows()
         selected_row = next(
-            (
-                row for row, button in enumerate(default_buttons)
-                if button.isChecked()
-            ),
+            (row for row, entry in enumerate(rows) if entry["is_default"]),
             None
         )
 
-        if selected_row is not None:
-            name_item = table.item(selected_row, 0)
-            command_item = table.item(selected_row, 1)
+        if selected_row is not None and not has_browser(rows[selected_row]):
+            QMessageBox.information(
+                self, "TelaEdit",
+                "Please select a row with a browser name and executable path."
+            )
+            return
 
-            if not (
-                name_item and name_item.text().strip()
-                and command_item and command_item.text().strip()
-            ):
-                QMessageBox.information(
-                    self, "TelaEdit",
-                    "Please select a row with a browser name and executable path."
-                )
-                return
+        entries = []
 
-        for row in range(10):
-            name_item = table.item(row, 0)
-            command_item = table.item(row, 1)
-
-            name = name_item.text().strip() if name_item else ""
-            command = command_item.text().strip() if command_item else ""
-
+        for row, entry in enumerate(rows):
             entries.append({
-                "name": name,
-                "command": command,
-                "icon": icon_boxes[row].currentData() or DEFAULT_BROWSER_ICON,
+                "name": entry["name"].strip(),
+                "command": entry["command"].strip(),
+                "icon": entry["icon"],
                 "is_default": row == selected_row
             })
 
@@ -3461,12 +4322,24 @@ class TelaEdit(QMainWindow):
         insert_menu.addAction(self.actions["insert_div"])
         insert_menu.addAction(self.actions["insert_ul"])
         insert_menu.addAction(self.actions["insert_ol"])
+
+        for tag, *_ in LIST_TAGS:
+            insert_menu.addAction(self.actions["tag_" + tag])
         insert_menu.addAction(self.actions["insert_hr"])
 
         insert_menu.addSeparator()
 
         insert_menu.addAction(self.actions["insert_link"])
         insert_menu.addAction(self.actions["insert_image"])
+
+        # The extra tag tabs as submenus: Tables, Forms, HTML 5, Media, Text
+        insert_menu.addSeparator()
+
+        for tab_name, tags in TAG_TABS:
+            submenu = insert_menu.addMenu(tab_name)
+
+            for tag, *_ in tags:
+                submenu.addAction(self.actions["tag_" + tag])
 
         tools_menu = bar.addMenu("&Tools")
 
@@ -3486,6 +4359,8 @@ class TelaEdit(QMainWindow):
              self.show_document_weight
         )
         tools_menu.addAction(self.tidy_action)
+        tools_menu.addAction(self.actions["check_css"])
+        tools_menu.addAction(self.actions["check_css_online"])
 
         # External programs: separator, the user's tools, then Configure
         self.tools_menu = tools_menu
@@ -3507,11 +4382,13 @@ class TelaEdit(QMainWindow):
         settings_menu.addAction("Indentation Settings...", self.choose_indentation_settings)
         settings_menu.addAction("Keyboard Shortcuts...", self.show_keyboard_shortcuts)
         settings_menu.addAction("Toolbar icon size...", self.choose_toolbar_icon_size)
+        settings_menu.addAction(self.actions["explorer_right"])
         settings_menu.addAction(
             "Syntax highlighting colours...", self.choose_syntax_colours
         )
         settings_menu.addSeparator()
         settings_menu.addAction(self.actions["tag_completion"])
+        settings_menu.addAction(self.actions["strong_em"])
         settings_menu.addAction(self.actions["spellcheck"])
         settings_menu.addAction("Spelling language...", self.choose_spelling_language)
         settings_menu.addAction("Spelling highlight style...", self.choose_spell_style)
@@ -3554,9 +4431,27 @@ class TelaEdit(QMainWindow):
             )),
             ("Lists", (
                 "insert_ul", "insert_ol",
-            )),
-            ("Tools", ()),
+            ) + tuple("tag_" + tag for tag, *_ in LIST_TAGS)),
         ]
+
+        # The extra tag tabs, then Tools
+        for tab_name, tags in TAG_TABS:
+            tab_definitions.append(
+                (tab_name, tuple("tag_" + tag for tag, *_ in tags))
+            )
+
+        tab_definitions.append(("Tools", ()))
+
+        # ---- Quickbar: your own choice of buttons, always the first tab ----
+        # Right-click a button on any other tab and choose Add to Quickbar
+        self.quickbar_names = self.load_quickbar()
+
+        quickbar_page = QWidget()
+        self.quickbar_layout = QHBoxLayout(quickbar_page)
+        self.quickbar_layout.setContentsMargins(4, 3, 4, 3)
+        self.quickbar_layout.setSpacing(3)
+        self.main_toolbar_tabs.addTab(quickbar_page, "Quickbar")
+        self.refresh_quickbar()
 
         for tab_name, action_names in tab_definitions:
             page = QWidget()
@@ -3574,24 +4469,14 @@ class TelaEdit(QMainWindow):
                 for name in action_names:
                     action = self.actions.get(name)
                     if action:
-                        button = QToolButton(page)
-                        button.setDefaultAction(action)
-
-                        # Give tidy text beside its icon; keep others icon-only
-                        if name == "tidy":
-                            button.setToolButtonStyle(
-                                Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-                            )
-                        else:
-                            button.setToolButtonStyle(
-                                Qt.ToolButtonStyle.ToolButtonIconOnly
-                            )
-
-                        button.setToolTip(action.toolTip())
+                        button = self.make_toolbar_button(page, name, action)
                         layout.addWidget(button)
                 layout.addStretch()
 
             self.main_toolbar_tabs.addTab(page, tab_name)
+
+        # Open on the Quickbar if it has buttons, otherwise on Standard
+        self.main_toolbar_tabs.setCurrentIndex(0 if self.quickbar_names else 1)
 
         browser_page = QWidget()
         self.browser_tab_layout = QHBoxLayout(browser_page)
@@ -3608,6 +4493,159 @@ class TelaEdit(QMainWindow):
 
         self.refresh_browser_toolbar()
         self.apply_toolbar_icon_size()
+
+    def make_toolbar_button(self, page, name, action, on_quickbar=False):
+        """One toolbar button. Right-clicking it offers Add to Quickbar, or
+        on the Quickbar itself: Move Left, Move Right and Remove."""
+        button = QToolButton(page)
+        button.setDefaultAction(action)
+
+        # Give tidy text beside its icon; keep others icon-only
+        if name == "tidy":
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        else:
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+
+        button.setToolTip(action.toolTip())
+        button.setIconSize(QSize(self.toolbar_icon_size, self.toolbar_icon_size))
+
+        button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        button.customContextMenuRequested.connect(
+            lambda position, b=button, n=name, q=on_quickbar:
+                self.toolbar_button_menu(b, n, q, position)
+        )
+
+        return button
+
+    def toolbar_button_menu(self, button, name, on_quickbar, position):
+        menu = QMenu(self)
+
+        if on_quickbar:
+            index = self.quickbar_names.index(name)
+
+            left = menu.addAction("Move Left")
+            left.setEnabled(index > 0)
+            left.triggered.connect(
+                lambda checked=False: self.move_quickbar_button(name, -1)
+            )
+
+            right = menu.addAction("Move Right")
+            right.setEnabled(index < len(self.quickbar_names) - 1)
+            right.triggered.connect(
+                lambda checked=False: self.move_quickbar_button(name, 1)
+            )
+
+            menu.addSeparator()
+            remove = menu.addAction("Remove from Quickbar")
+            remove.triggered.connect(
+                lambda checked=False: self.remove_from_quickbar(name)
+            )
+        elif name in self.quickbar_names:
+            already = menu.addAction("Already on the Quickbar")
+            already.setEnabled(False)
+            remove = menu.addAction("Remove from Quickbar")
+            remove.triggered.connect(
+                lambda checked=False: self.remove_from_quickbar(name)
+            )
+        else:
+            add = menu.addAction("Add to Quickbar")
+            add.triggered.connect(
+                lambda checked=False: self.add_to_quickbar(name)
+            )
+
+        menu.exec(button.mapToGlobal(position))
+
+    def load_quickbar(self):
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            names = data.get("quickbar", [])
+        except (OSError, ValueError):
+            names = []
+
+        if not isinstance(names, list):
+            return []
+
+        # Skip anything that no longer exists, and any repeats
+        result = []
+
+        for name in names:
+            if isinstance(name, str) and name in self.actions and name not in result:
+                result.append(name)
+
+        return result
+
+    def save_quickbar(self):
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+
+        data["quickbar"] = list(self.quickbar_names)
+
+        try:
+            STATE_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        except OSError as error:
+            QMessageBox.warning(
+                self, "TelaEdit",
+                f"Could not save the Quickbar:\n{error}"
+            )
+
+    def refresh_quickbar(self):
+        """Rebuilds the Quickbar tab from the list of chosen buttons."""
+        layout = self.quickbar_layout
+        page = layout.parentWidget()
+
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        if not self.quickbar_names:
+            hint = QLabel(
+                "Your Quickbar is empty. Right-click a button on any other "
+                "tab and choose Add to Quickbar.",
+                page
+            )
+            layout.addWidget(hint)
+
+        for name in self.quickbar_names:
+            action = self.actions.get(name)
+            if action:
+                layout.addWidget(
+                    self.make_toolbar_button(page, name, action, on_quickbar=True)
+                )
+
+        layout.addStretch()
+
+    def add_to_quickbar(self, name):
+        if name in self.quickbar_names:
+            return
+
+        self.quickbar_names.append(name)
+        self.save_quickbar()
+        self.refresh_quickbar()
+
+        label = self.actions[name].text().replace("&", "")
+        self.status.showMessage(f'"{label}" added to the Quickbar.', 4000)
+
+    def remove_from_quickbar(self, name):
+        if name not in self.quickbar_names:
+            return
+
+        self.quickbar_names.remove(name)
+        self.save_quickbar()
+        self.refresh_quickbar()
+
+    def move_quickbar_button(self, name, step):
+        index = self.quickbar_names.index(name)
+        target = index + step
+
+        if 0 <= target < len(self.quickbar_names):
+            names = self.quickbar_names
+            names[index], names[target] = names[target], names[index]
+            self.save_quickbar()
+            self.refresh_quickbar()
 
     def load_toolbar_icon_size(self):
         try:
@@ -3964,6 +5002,92 @@ class TelaEdit(QMainWindow):
         editor = self.editor()
         if editor:
             getattr(editor, method)()
+
+    def insert_bold_tag(self):
+        """The Bold button: <strong> or <b>, depending on the setting."""
+        if self.actions["strong_em"].isChecked():
+            self.insert_tag_pair("<strong>", "</strong>")
+        else:
+            self.insert_tag_pair("<b>", "</b>")
+
+    def insert_italic_tag(self):
+        """The Italic button: <em> or <i>, depending on the setting."""
+        if self.actions["strong_em"].isChecked():
+            self.insert_tag_pair("<em>", "</em>")
+        else:
+            self.insert_tag_pair("<i>", "</i>")
+
+    def toggle_strong_em(self, checked):
+        self.update_bold_italic_tooltips()
+
+        if checked:
+            message = "Bold and Italic now insert <strong> and <em>."
+        else:
+            message = "Bold and Italic now insert <b> and <i>."
+
+        self.status.showMessage(message, 5000)
+
+        # Save straight away, so the choice is kept even if TelaEdit
+        # is not closed normally
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+
+        data["strong_em_tags"] = bool(checked)
+
+        try:
+            STATE_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        except OSError:
+            pass
+
+    def update_bold_italic_tooltips(self):
+        """Shows which tags the Bold and Italic buttons will insert."""
+        if self.actions["strong_em"].isChecked():
+            bold, italic = "<strong>", "<em>"
+        else:
+            bold, italic = "<b>", "<i>"
+
+        self.actions["insert_bold"].setToolTip(f"Bold ({bold})")
+        self.actions["insert_italic"].setToolTip(f"Italic ({italic})")
+
+    def insert_tag_text(self, opening, closing):
+        """Used by the tag tabs. Selected text is wrapped in the tags.
+        Otherwise the tags are inserted and the cursor goes inside the
+        first empty "" (such as src=""), or between the two tags."""
+        editor = self.editor()
+        if not editor:
+            return
+
+        if editor.hasSelectedText() and closing:
+            selected = editor.selectedText()
+            editor.replaceSelectedText(f"{opening}{selected}{closing}")
+            editor.setFocus()
+            return
+
+        if editor.hasSelectedText():
+            # A tag with no end tag (such as <br>) replaces the selection
+            editor.removeSelectedText()
+
+        text = opening + closing
+        line, index = editor.getCursorPosition()
+        editor.insertAt(text, line, index)
+
+        # Work out where the cursor should end up, allowing for new lines
+        quotes = opening.find('""')
+        offset = quotes + 1 if quotes >= 0 else len(opening)
+
+        before = text[:offset]
+        new_lines = before.count("\n")
+
+        if new_lines:
+            editor.setCursorPosition(
+                line + new_lines, len(before) - before.rfind("\n") - 1
+            )
+        else:
+            editor.setCursorPosition(line, index + offset)
+
+        editor.setFocus()
 
     def insert_tag_pair(self, opening, closing):
         editor = self.editor()
@@ -5747,7 +6871,7 @@ class TelaEdit(QMainWindow):
                     if index == select_index:
                         snippet_list.setCurrentItem(item)
 
-        def snippet_dialog(title, snippet=None):
+        def snippet_dialog(title, snippet=None, branch=""):
             edit_dialog = QDialog(dialog)
             edit_dialog.setWindowTitle(title)
             edit_dialog.resize(500, 500)
@@ -5784,6 +6908,11 @@ class TelaEdit(QMainWindow):
                 )
                 before_edit.setPlainText(snippet.get("before", ""))
                 after_edit.setPlainText(snippet.get("after", ""))
+            elif branch:
+                # Adding to the branch that was selected: fill it in and
+                # start the cursor in the Name box
+                branch_edit.setText(branch)
+                name_edit.setFocus()
 
             buttons = QHBoxLayout()
             save_button = QPushButton("Save")
@@ -5847,14 +6976,27 @@ class TelaEdit(QMainWindow):
             }
 
         def add_snippet():
-            snippet = snippet_dialog("Add Snippet")
+            # Start the new snippet in the selected branch: either the
+            # branch heading itself, or the branch of the selected snippet
+            branch = ""
+            item = snippet_list.currentItem()
+
+            if item:
+                if item.data(0, Qt.ItemDataRole.UserRole) is None:
+                    branch = item.text(0)
+                elif item.parent():
+                    branch = item.parent().text(0)
+
+            snippet = snippet_dialog("Add Snippet", branch=branch)
             if snippet is None:
                 return
 
             snippets.append(snippet)
             self.save_snippets(snippets)
             self.refresh_snippet_list()
-            refresh_list()
+
+            # Select the new snippet so you can see where it went
+            refresh_list(select_index=len(snippets) - 1)
 
         def edit_snippet():
             item = snippet_list.currentItem()
@@ -6156,6 +7298,123 @@ class TelaEdit(QMainWindow):
         except Exception as e:
             self.log_message(f"An unexpected error occurred while running Tidy: {e}")
 
+    def check_css(self):
+        """Tools > Check CSS: an offline check of the current document.
+        A CSS file is checked as a whole; for an HTML page, the CSS in its
+        <style> blocks and style="..." attributes is checked. Click a
+        problem in the output panel to jump to it."""
+        editor = self.editor()
+
+        if editor is None:
+            self.log_message("No document is open to check.")
+            return
+
+        text = editor.text()
+        path = getattr(editor, "path", None)
+        name = Path(path).name if path else "Untitled"
+
+        self.log_message(f"--- Checking CSS: {name} ---")
+
+        if not text.strip():
+            self.log_message("The document is empty. Nothing to check.")
+            return
+
+        is_css = (
+            (path and Path(path).suffix.lower() == ".css")
+            or (not path and "<" not in text)
+        )
+
+        if is_css:
+            problems = check_css_text(text)
+        else:
+            problems, places = check_css_in_html(text)
+
+            if not places:
+                self.log_message(
+                    "This page has no <style> block or style=\"...\" "
+                    "attribute, so there is no CSS to check."
+                )
+                return
+
+        if not problems:
+            self.log_message("No problems found. ✨")
+            self.log_message(
+                "(This is a quick check for common mistakes. For a full "
+                "check use Tools > Check CSS online (W3C).)"
+            )
+            return
+
+        errors = 0
+        warnings = 0
+
+        for offset, kind, message in sorted(problems):
+            line = text.count("\n", 0, offset) + 1
+            column = offset - (text.rfind("\n", 0, offset) + 1) + 1
+            self.log_message(f"line {line} column {column} - {kind}: {message}")
+
+            if kind == "Error":
+                errors += 1
+            else:
+                warnings += 1
+
+        summary = []
+        if errors:
+            summary.append(f"{errors} error" + ("s" if errors != 1 else ""))
+        if warnings:
+            summary.append(f"{warnings} warning" + ("s" if warnings != 1 else ""))
+
+        self.log_message(
+            "Found " + " and ".join(summary) + ". Click a line above to go to it."
+        )
+
+    def check_css_online(self):
+        """Tools > Check CSS online (W3C): copies the CSS to the clipboard
+        and opens the W3C CSS validator's 'direct input' page, ready for
+        it to be pasted in."""
+        editor = self.editor()
+
+        if editor is None:
+            return
+
+        text = editor.selectedText() if editor.hasSelectedText() else editor.text()
+        path = getattr(editor, "path", None)
+        is_css = path and Path(path).suffix.lower() == ".css"
+
+        if not editor.hasSelectedText() and not is_css:
+            # An HTML page: send just the CSS from its <style> blocks
+            blocks = re.findall(
+                r"<style\b[^>]*>(.*?)</style\s*>", text,
+                re.IGNORECASE | re.DOTALL
+            )
+            if blocks:
+                text = "\n".join(block.strip("\n") for block in blocks)
+
+        QApplication.clipboard().setText(text)
+        self.open_web_page("https://jigsaw.w3.org/css-validator/#validate_by_input")
+        self.status.showMessage(
+            "The CSS has been copied. Paste it into the box on the W3C page "
+            "(Ctrl+V), then click Check.", 15000
+        )
+
+    def open_web_page(self, url):
+        """Opens a web page in the default browser."""
+        opener = shutil.which("xdg-open")
+
+        if opener:
+            try:
+                subprocess.Popen(
+                    [opener, url],
+                    env=external_program_env(),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+                return
+            except OSError:
+                pass
+
+        QDesktopServices.openUrl(QUrl(url))
+
     def create_output_panel(self):
         """Creates the bottom output/message dock panel.
 
@@ -6225,6 +7484,12 @@ class TelaEdit(QMainWindow):
         run_tidy_btn.clicked.connect(self.run_html_tidy)
 
         top_bar_layout.addWidget(run_tidy_btn)
+
+        check_css_btn = QPushButton("Check CSS", self)
+        if hasattr(self, 'actions') and "check_css" in self.actions:
+            check_css_btn.setIcon(self.actions["check_css"].icon())
+        check_css_btn.clicked.connect(self.check_css)
+        top_bar_layout.addWidget(check_css_btn)
         top_bar_layout.addStretch()
 
         layout.addLayout(top_bar_layout)
